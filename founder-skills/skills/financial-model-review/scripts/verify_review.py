@@ -111,11 +111,28 @@ def _check_existence(dir_path: str, gate: int, model_format: str | None) -> dict
         all_names.append("commentary.json")
 
     for name in all_names:
-        data, is_valid, is_corrupt = _load_artifact(dir_path, name)
         is_required = name in required
+
+        # HTML files: check existence only, no JSON parsing
+        if name.endswith(".html"):
+            path = os.path.join(dir_path, name)
+            exists = os.path.isfile(path)
+            entry: dict[str, Any] = {
+                "exists": exists,
+                "valid": exists,
+                "issues": [],
+                "_data": None,
+                "_skipped": False,
+            }
+            if not exists and is_required:
+                entry["issues"].append(_issue("error", f"{name}: missing (required)"))
+            results[name] = entry
+            continue
+
+        data, is_valid, is_corrupt = _load_artifact(dir_path, name)
         exists = is_valid or is_corrupt  # file exists even if corrupt
 
-        entry: dict[str, Any] = {
+        entry = {
             "exists": exists,
             "valid": is_valid,
             "issues": [],
