@@ -162,6 +162,55 @@ def _periodicity_summary(sheets: list[dict[str, Any]]) -> str:
     return "mixed"
 
 
+_MAX_HEADER_SCAN = 10  # Scan first N rows for header detection
+
+
+def _find_header_row(rows: list[list[Any]], max_scan: int = _MAX_HEADER_SCAN) -> int:
+    """Find the best header row in the first *max_scan* rows.
+
+    Scores each row by:
+    1. Number of cells that match period patterns (quarterly, monthly, annual)
+    2. Number of non-null string values (fallback for non-period headers)
+
+    Returns the row index, or -1 if no row has enough non-null values.
+    A row needs at least 2 non-null string values to qualify.
+    """
+    best_idx = -1
+    best_period_score = 0
+    best_string_score = 0
+
+    for i, row in enumerate(rows[:max_scan]):
+        period_score = 0
+        string_score = 0
+        for val in row:
+            if val is None:
+                continue
+            s = str(val)
+            if not s.strip():
+                continue
+            string_score += 1
+            if _classify_header(s) is not None:
+                period_score += 1
+
+        # Need at least 2 non-null strings to be a header candidate
+        if string_score < 2:
+            continue
+
+        # Prefer rows with period patterns; break ties by string count
+        if (period_score, string_score) > (best_period_score, best_string_score):
+            best_period_score = period_score
+            best_string_score = string_score
+            best_idx = i
+
+    # If no period headers found but row 0 has strings, use row 0
+    if best_idx == -1 and rows:
+        row0_strings = sum(1 for v in rows[0] if v is not None and str(v).strip())
+        if row0_strings >= 2:
+            best_idx = 0
+
+    return best_idx
+
+
 def extract_xlsx(file_path: str) -> dict[str, Any]:
     """Extract data from an Excel file."""
     try:
@@ -176,14 +225,21 @@ def extract_xlsx(file_path: str) -> dict[str, Any]:
     wb = load_workbook(file_path, data_only=True, read_only=True)
     sheets = []
     for ws in wb.worksheets:
-        rows_data: list[list[Any]] = []
-        headers: list[str] = []
-        for i, row in enumerate(ws.iter_rows(values_only=True)):
-            row_vals = [_safe_value(c) for c in row]
-            if i == 0:
-                headers = [str(v) if v is not None else f"col_{j}" for j, v in enumerate(row)]
-            else:
-                rows_data.append(row_vals)
+        all_rows: list[list[Any]] = []
+        for row in ws.iter_rows(values_only=True):
+            all_rows.append([_safe_value(c) for c in row])
+
+        header_idx = _find_header_row(all_rows)
+        if header_idx >= 0:
+            raw_header = all_rows[header_idx]
+            headers = [str(v) if v is not None else f"col_{j}" for j, v in enumerate(raw_header)]
+            rows_data = all_rows[header_idx + 1 :]
+        else:
+            # No good header row found — use col_N fallback
+            ncols = len(all_rows[0]) if all_rows else 0
+            headers = [f"col_{j}" for j in range(ncols)]
+            rows_data = all_rows
+
         sheets.append(
             {
                 "name": ws.title,
