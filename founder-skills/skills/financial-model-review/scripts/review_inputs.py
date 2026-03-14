@@ -187,21 +187,62 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .accordion-body { padding: 8px 0 8px 8px; display: none; }
   .accordion-body.open { display: block; }
 
-  /* Corrections bar */
+  /* Corrections drawer */
   .corrections-bar {
     position: fixed; bottom: 0; left: 0; right: 0;
     background: #ffffff; border-top: 1px solid #e5e7eb;
-    padding: 12px 32px; display: flex; align-items: center;
-    gap: 16px; z-index: 100; box-shadow: 0 -2px 8px rgba(0,0,0,0.05);
+    z-index: 100; box-shadow: 0 -2px 8px rgba(0,0,0,0.05);
+    transition: max-height 0.25s ease;
   }
+  .corrections-summary {
+    padding: 12px 32px; display: flex; align-items: center;
+    gap: 16px; cursor: pointer; user-select: none;
+  }
+  .corrections-summary:hover { background: #f9fafb; }
   .corrections-count { font-size: 0.875rem; color: #6b7280; }
   .corrections-count strong { color: #0d549d; }
-  .corrections-chips {
-    flex: 1; overflow-x: auto; display: flex; gap: 8px; font-size: 0.8rem;
+  .corrections-toggle {
+    font-size: 0.8rem; color: #6b7280; margin-left: auto;
+    display: flex; align-items: center; gap: 4px;
   }
-  .correction-chip {
-    background: #f3f4f6; border-radius: 4px; padding: 4px 10px;
-    white-space: nowrap;
+  .corrections-toggle .arrow {
+    display: inline-block; transition: transform 0.2s;
+    font-size: 0.7rem;
+  }
+  .corrections-bar.open .corrections-toggle .arrow { transform: rotate(180deg); }
+  .corrections-drawer {
+    max-height: 0; overflow: hidden; transition: max-height 0.25s ease;
+    border-top: 1px solid #e5e7eb;
+  }
+  .corrections-bar.open .corrections-drawer {
+    max-height: 300px; overflow-y: auto;
+  }
+  .corrections-table {
+    width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  }
+  .corrections-table th {
+    text-align: left; padding: 8px 32px; background: #f9fafb;
+    color: #6b7280; font-weight: 600; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.03em;
+    position: sticky; top: 0;
+  }
+  .corrections-table td {
+    padding: 8px 32px; border-top: 1px solid #f3f4f6;
+  }
+  .corrections-table .field-col { color: #1f2937; font-weight: 500; }
+  .corrections-table .old-val { color: #9ca3af; text-decoration: line-through; }
+  .corrections-table .new-val { color: #0d549d; font-weight: 500; }
+  .corrections-table .undo-btn {
+    background: none; border: 1px solid #d1d5db; color: #6b7280;
+    border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 0.75rem;
+  }
+  .corrections-table .undo-btn:hover { background: #f3f4f6; color: #1f2937; }
+  .corrections-empty {
+    padding: 16px 32px; color: #9ca3af; font-size: 0.85rem; text-align: center;
+  }
+  .corrections-actions {
+    padding: 12px 32px; display: flex; justify-content: flex-end;
+    border-top: 1px solid #e5e7eb;
   }
   .submit-btn {
     background: #0d549d; color: #ffffff; border: none;
@@ -245,9 +286,20 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="tab-panels"></div>
 
 <div class="corrections-bar" id="corrections-bar">
-  <div class="corrections-count"><strong id="corr-count">0</strong> corrections</div>
-  <div class="corrections-chips" id="corr-chips"></div>
-  <button class="submit-btn" id="submit-btn">Submit Corrections</button>
+  <div class="corrections-summary" id="corrections-summary">
+    <div class="corrections-count"><strong id="corr-count">0</strong> corrections</div>
+    <div class="corrections-toggle"><span>Show changes</span> <span class="arrow">&#9650;</span></div>
+  </div>
+  <div class="corrections-drawer" id="corrections-drawer">
+    <table class="corrections-table" id="corrections-table">
+      <thead><tr><th>Field</th><th>Original</th><th>New Value</th><th></th></tr></thead>
+      <tbody id="corrections-tbody"></tbody>
+    </table>
+    <div class="corrections-empty" id="corrections-empty">No changes yet — edit any field above.</div>
+    <div class="corrections-actions">
+      <button class="submit-btn" id="submit-btn">Submit Corrections</button>
+    </div>
+  </div>
 </div>
 
 <div class="overlay" id="overlay">
@@ -522,17 +574,62 @@ function updateSanityFromServer(sanity) {
   }
 }
 
-/* ===== Corrections bar ===== */
+/* ===== Corrections drawer ===== */
 function refreshCorrectionsBar() {
   document.getElementById("corr-count").textContent = String(corrections.size);
-  var chips = document.getElementById("corr-chips");
-  while (chips.firstChild) chips.removeChild(chips.firstChild);
-  corrections.forEach(function(c) {
-    var span = document.createElement("span");
-    span.className = "correction-chip";
-    span.textContent = c.label + ": " + (c.was != null ? String(c.was) : "\u2014") + " \u2192 " + (c.now != null ? String(c.now) : "\u2014");
-    chips.appendChild(span);
+  var tbody = document.getElementById("corrections-tbody");
+  while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+  var empty = document.getElementById("corrections-empty");
+  var table = document.getElementById("corrections-table");
+  if (corrections.size === 0) {
+    empty.style.display = "block";
+    table.style.display = "none";
+    return;
+  }
+  empty.style.display = "none";
+  table.style.display = "table";
+  corrections.forEach(function(c, path) {
+    var tr = document.createElement("tr");
+    var tdField = document.createElement("td");
+    tdField.className = "field-col";
+    tdField.textContent = c.label;
+    var tdOld = document.createElement("td");
+    tdOld.className = "old-val";
+    tdOld.textContent = c.was != null ? String(c.was) : "\u2014";
+    var tdNew = document.createElement("td");
+    tdNew.className = "new-val";
+    tdNew.textContent = c.now != null ? String(c.now) : "\u2014";
+    var tdUndo = document.createElement("td");
+    var undoBtn = document.createElement("button");
+    undoBtn.className = "undo-btn";
+    undoBtn.textContent = "Undo";
+    undoBtn.addEventListener("click", function() {
+      setByPath(state, path, c.was);
+      corrections.delete(path);
+      /* Update the input field */
+      var input = document.querySelector("[data-path=\"" + path + "\"]");
+      if (input) {
+        input.value = c.was != null ? String(c.was) : "";
+        input.classList.remove("changed");
+      }
+      refreshCorrectionsBar();
+      refreshSanity();
+      scheduleCheck();
+    });
+    tdUndo.appendChild(undoBtn);
+    tr.appendChild(tdField);
+    tr.appendChild(tdOld);
+    tr.appendChild(tdNew);
+    tr.appendChild(tdUndo);
+    tbody.appendChild(tr);
   });
+}
+
+function toggleDrawer() {
+  document.getElementById("corrections-bar").classList.toggle("open");
+  var toggleText = document.querySelector(".corrections-toggle span:first-child");
+  var bar = document.getElementById("corrections-bar");
+  toggleText.textContent = bar.classList.contains("open") ? "Hide changes" : "Show changes";
 }
 
 /* ===== Submit handler ===== */
@@ -1245,6 +1342,7 @@ function init() {
   buildSanityStrip();
   buildTabs();
   document.getElementById("submit-btn").addEventListener("click", submitFeedback);
+  document.getElementById("corrections-summary").addEventListener("click", toggleDrawer);
   refreshCorrectionsBar();
   scheduleCheck();
 }
