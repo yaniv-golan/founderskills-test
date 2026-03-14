@@ -37,6 +37,7 @@ All scripts are at `${CLAUDE_PLUGIN_ROOT}/skills/financial-model-review/scripts/
 - **`explore.py`** — Generates self-contained interactive HTML explorer from review artifacts; outputs HTML (not JSON)
 - **`review_inputs.py`** — Dual-mode review viewer: HTTP server with live validation (Claude Code) or self-contained static HTML with JS sanity metrics (Cowork); both modes produce corrections.json for apply_corrections.py
 - **`apply_corrections.py`** — Processes founder's downloaded corrections file: coerces types, normalizes ILS→USD, merges overrides, writes `corrected_inputs.json` and `extraction_corrections.json`
+- **`verify_review.py`** — Review completeness gate: checks artifact existence, content quality, and cross-artifact consistency; `--gate 1` for after-compose, `--gate 2` (default) for final; exit 0 = publishable, exit 1 = gaps remain
 
 Also available from `${CLAUDE_PLUGIN_ROOT}/scripts/` (shared):
 
@@ -368,7 +369,15 @@ python3 "$SCRIPTS/compose_report.py" --dir "$REVIEW_DIR" --pretty -o "$REVIEW_DI
 
 Check `validation.warnings`: fix high-severity (corrupt/missing artifacts), present medium-severity (checklist failures, runway inconsistencies, metrics gaps) in the report, note low/info. `--strict` only blocks on high-severity warnings — medium-severity warnings like `CHECKLIST_FAILURES` are review findings to present, not data errors to fix. This is a refinement loop — fix high-severity warnings, re-deposit, re-compose. If a warning flags a computed value that looks implausible (e.g., burn multiple > 20x), investigate the source artifact's inputs before re-composing — the fix may be in `inputs.json` or `unit_economics.json`, not in the compose step. If a `RUNWAY_INCONSISTENCY` warning mentions cash direction (cash increasing despite positive burn), check `inputs.json` for null or zero fields that should have values — null fields are the most common cause of phantom 'infinite runway' results.
 
-**Primary deliverable:** Read `report_markdown` from the output JSON, write it to `$REVIEW_DIR/report.md`, and display it to the user in full. **Present the file path** so the user can access it directly. Then add coaching commentary covering: (1) what metrics look strong and why investors will notice, (2) the single highest-leverage fix to improve investor readiness, (3) any data gaps that weaken the story (e.g., missing runway, incomplete unit economics), and (4) what to prioritize before the next fundraise conversation.
+**Primary deliverable:** Read `report_markdown` from the output JSON and write it to `$REVIEW_DIR/report.md`. **Do not display the report to the founder yet** — it will be presented after the final verification gate passes (Gate 2 below).
+
+### Verification Gate 1 (after compose)
+
+```bash
+python3 "$SCRIPTS/verify_review.py" --dir "$REVIEW_DIR" --gate 1 --pretty
+```
+
+**If exit code is non-zero:** read `summary.errors`. Each error names the artifact and what's wrong. Fix the issue by re-running the failing step, then re-run `verify_review.py --gate 1`. **Do not proceed to Step 8 until it exits 0.**
 
 ### Step 8a: Visualize (Optional)
 
@@ -376,7 +385,7 @@ Check `validation.warnings`: fix high-severity (corrupt/missing artifacts), pres
 python3 "$SCRIPTS/visualize.py" --dir "$REVIEW_DIR" -o "$REVIEW_DIR/report.html"
 ```
 
-**Present the HTML file path** to the user so they can open the visual report.
+Generate the file silently — it will be presented after Gate 2 passes.
 
 ### Step 8b: Write Commentary (Quantitative Path Only — MANDATORY)
 
@@ -407,7 +416,20 @@ Every sentence must contain at least one number from this company's review.
 python3 "$SCRIPTS/explore.py" --dir "$REVIEW_DIR" -o "$REVIEW_DIR/explore.html"
 ```
 
-Present to the founder: *"I've also generated an interactive explorer where you can adjust growth rate, burn, and raise amount to see how your runway and metrics change in real time. Open it in your browser (internet connection recommended for interactive charts)."*
+Generate the file silently — it will be presented after Gate 2 passes.
+
+### Verification Gate 2 (final)
+
+```bash
+python3 "$SCRIPTS/verify_review.py" --dir "$REVIEW_DIR" --pretty
+```
+
+**This is the final quality gate.** If it exits non-zero, fix the issues before presenting anything to the founder. Once it passes, present everything to the founder:
+
+1. Display the full report markdown from `$REVIEW_DIR/report.md`
+2. Present the `report.html` file path
+3. Present the `explore.html` file path
+4. Add coaching commentary: (1) what metrics look strong and why investors will notice, (2) the single highest-leverage fix to improve investor readiness, (3) any data gaps that weaken the story, (4) what to prioritize before the next fundraise conversation
 
 ## Scoring
 
