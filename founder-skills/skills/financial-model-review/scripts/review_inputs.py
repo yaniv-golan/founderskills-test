@@ -634,12 +634,27 @@ function toggleDrawer() {
 
 /* ===== Submit handler ===== */
 function triggerDownload(payload) {
-  var blob = new Blob([payload], { type: "application/json" });
-  var a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "corrections.json";
-  a.click();
-  URL.revokeObjectURL(a.href);
+  try {
+    var blob = new Blob([payload], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "corrections.json";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+  } catch (e) {
+    /* Fallback: data URI if Blob/ObjectURL not supported */
+    var a2 = document.createElement("a");
+    a2.href = "data:application/json;charset=utf-8," + encodeURIComponent(payload);
+    a2.download = "corrections.json";
+    document.body.appendChild(a2);
+    a2.click();
+    document.body.removeChild(a2);
+  }
 }
 
 function submitFeedback() {
