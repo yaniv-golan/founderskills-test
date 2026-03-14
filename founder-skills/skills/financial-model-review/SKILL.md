@@ -205,6 +205,8 @@ INPUTS_EOF
 
 **Path A — File extraction** (`model_format` is `spreadsheet` or `partial`):
 
+**IMPORTANT:** Do NOT show a summary table, preview, or confirmation dialog before launching the review page. Go straight to generating and launching the HTML viewer — it IS the review interface. Do not ask the founder to confirm values in chat first.
+
 **Environment detection:** If you are in Cowork (VM, no display, `/sessions/` path), use **static mode**. Otherwise (Claude Code, local terminal), use **server mode**.
 
 #### Server mode (Claude Code)
