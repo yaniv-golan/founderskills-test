@@ -670,7 +670,7 @@ function submitFeedback() {
   /* file:// URLs cannot use fetch — go straight to download */
   if (window.location.protocol === "file:") {
     triggerDownload(payload);
-    showOverlay();
+    showOverlay(true);
     return;
   }
 
@@ -680,18 +680,18 @@ function submitFeedback() {
     body: payload
   }).then(function(resp) {
     if (!resp.ok) throw new Error("Server error");
-    showOverlay();
+    showOverlay(false);
   }).catch(function() {
     triggerDownload(payload);
-    showOverlay();
+    showOverlay(true);
   });
 }
 
-function showOverlay() {
+function showOverlay(wasDownload) {
   var btn = document.getElementById("submit-btn");
   btn.textContent = "Submitted";
   var hint = document.getElementById("overlay-hint");
-  if (window.location.protocol === "file:") {
+  if (wasDownload) {
     hint.textContent = "Go back to your session and upload the corrections.json file.";
   } else {
     hint.textContent = "Go back to your session and tell Claude you\u2019re done.";
