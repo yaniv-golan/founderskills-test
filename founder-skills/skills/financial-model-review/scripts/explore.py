@@ -1116,40 +1116,16 @@ function renderRaisePlanner() {{
   if (!panel) return;
 
   var targetRaise = (DATA.bridge && DATA.bridge.raise_amount) || 3000000;
-  var amounts = [];
-  var raiseStep = targetRaise > 5000000 ? 1000000 : 500000;
-  for (var a = raiseStep; a <= targetRaise * 2; a += raiseStep) {{
-    amounts.push(a);
-  }}
-  if (amounts.length < 3) amounts = [500000, 1000000, 1500000, 2000000, 3000000, 5000000];
-
-  var results = amounts.map(function(amt) {{
-    var p = getProjectionParams();
-    p.cash0 = state.cash0 + amt;
-    p.burnChange = state.burnChange;
-    var r = projectScenario(p);
-    return {{
-      amount: amt,
-      runway: r.runway_months || DATA.engine.max_months,
-      alive: r.default_alive
-    }};
-  }});
-
-  // Check if already self-sustaining with no raise at all
-  var noRaise = projectScenario(getProjectionParams());
-  var allMaxed = noRaise.default_alive;
+  var maxRaise = Math.max(targetRaise * 2, 6000000);
 
   var target = state.targetRunway;
   var markup = '<h2>Raise Planner</h2>';
+  markup += '<div id="raise-summary" style="background:#f0f7ff;border-left:4px solid #2563eb;'
+    + 'padding:12px 16px;border-radius:4px;margin-bottom:16px;">'
+    + '<div id="raise-headline" style="font-size:0.95rem;font-weight:600;color:#1e40af;"></div>'
+    + '<div id="raise-detail" style="font-size:0.8rem;color:#3b82f6;margin-top:4px;"></div>'
+    + '</div>';
   markup += commentaryBox('raise_planner');
-  if (allMaxed) {{
-    markup += '<div style="background:#f0fdf4;border-left:3px solid #34c759;'
-      + 'padding:12px 16px;margin-bottom:16px;border-radius:4px">'
-      + '<strong>Already self-sustaining</strong> at current growth ('
-      + fmtPct(state.growthRate, 1) + ' MoM). '
-      + 'Try lowering the growth rate to see when a raise becomes necessary.'
-      + '</div>';
-  }}
   markup += '<div class="chart-container"><canvas id="chart-raise"></canvas></div>';
   markup += '<div id="sliders-raise"></div>';
   setContent(panel, markup);
@@ -1158,12 +1134,12 @@ function renderRaisePlanner() {{
   sliderDiv.appendChild(makeSlider({{
     id: 'target-runway', label: 'Target runway', min: 12, max: 36, step: 1,
     value: target, fmt: function(v) {{ return v + ' months'; }},
-    onChange: function(v) {{ state.targetRunway = v; renderRaisePlanner(); }}
+    onChange: function(v) {{ state.targetRunway = v; updateRaisePlannerChart(); }}
   }}));
   sliderDiv.appendChild(makeSlider({{
     id: 'growth-rp', label: 'Growth rate', min: 0, max: 0.30, step: 0.005,
     value: state.growthRate, fmt: function(v) {{ return fmtPct(v, 1); }},
-    onChange: function(v) {{ state.growthRate = v; renderRaisePlanner(); }}
+    onChange: function(v) {{ state.growthRate = v; updateRaisePlannerChart(); }}
   }}));
 
   // Advanced
@@ -1181,40 +1157,159 @@ function renderRaisePlanner() {{
   advPanel.appendChild(makeSlider({{
     id: 'burn-change', label: 'Burn increase after raise', min: 0, max: 0.50, step: 0.05,
     value: state.burnChange, fmt: function(v) {{ return '+' + fmtPct(v, 0); }},
-    onChange: function(v) {{ state.burnChange = v; renderRaisePlanner(); }}
+    onChange: function(v) {{ state.burnChange = v; updateRaisePlannerChart(); }}
   }}));
   sliderDiv.appendChild(advPanel);
 
-  // Chart
+  // Build line chart
   var ctx = document.getElementById('chart-raise');
   if (charts.raise) charts.raise.destroy();
   charts.raise = new Chart(ctx, {{
-    type: 'bar',
+    type: 'line',
     data: {{
-      labels: results.map(function(r) {{ return fmtCurrency(r.amount); }}),
-      datasets: [{{
-        label: 'Runway (months)',
-        data: results.map(function(r) {{ return r.runway; }}),
-        backgroundColor: results.map(function(r) {{
-          return r.runway >= target ? '#34c759' : r.runway >= target * 0.8 ? '#ff9f0a' : '#ff3b30';
-        }})
-      }}]
+      datasets: [
+        {{
+          label: 'Runway (months)',
+          data: [],
+          borderColor: '#16a34a',
+          backgroundColor: 'rgba(22, 163, 106, 0.08)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          borderWidth: 2.5
+        }},
+        {{
+          label: 'Target',
+          data: [],
+          borderColor: '#2563eb',
+          borderDash: [6, 3],
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: false
+        }}
+      ]
     }},
     options: {{
       responsive: true,
       maintainAspectRatio: false,
+      interaction: {{
+        mode: 'index',
+        intersect: false
+      }},
       plugins: {{
-        legend: {{ display: false }}
+        legend: {{ display: false }},
+        tooltip: {{
+          callbacks: {{
+            title: function(items) {{
+              return '$' + (items[0].parsed.x / 1e6).toFixed(1) + 'M raise';
+            }},
+            label: function(item) {{
+              if (item.datasetIndex === 1) return 'Target: ' + item.parsed.y + ' months';
+              var v = item.parsed.y;
+              return 'Runway: ' + (v >= DATA.engine.max_months ? DATA.engine.max_months + '+' : v) + ' months';
+            }}
+          }}
+        }}
       }},
       scales: {{
+        x: {{
+          type: 'linear',
+          title: {{ display: true, text: 'Raise Amount', font: {{ size: 12, weight: '600' }}, color: '#6b7280' }},
+          ticks: {{
+            callback: function(v) {{ return '$' + (v / 1e6).toFixed(0) + 'M'; }},
+            stepSize: 2000000,
+            color: '#9ca3af'
+          }},
+          grid: {{ color: '#f3f4f6' }},
+          min: 0,
+          max: maxRaise
+        }},
         y: {{
-          beginAtZero: true,
-          suggestedMax: Math.max(target + 6, Math.max.apply(null, results.map(function(r) {{ return r.runway; }}))),
-          title: {{ display: true, text: 'Months' }}
+          title: {{ display: true, text: 'Runway (months)', font: {{ size: 12, weight: '600' }}, color: '#6b7280' }},
+          ticks: {{ color: '#9ca3af' }},
+          grid: {{ color: '#f3f4f6' }},
+          min: 0,
+          max: 65
         }}
       }}
     }}
   }});
+
+  // Store maxRaise for updates
+  charts.raiseMaxAmount = maxRaise;
+
+  // Initial data population
+  updateRaisePlannerChart();
+}}
+
+function updateRaisePlannerChart() {{
+  if (!charts.raise) return;
+  var maxRaise = charts.raiseMaxAmount || 6000000;
+  var target = state.targetRunway;
+
+  // Compute runway for $0 to maxRaise in $500K steps
+  var points = [];
+  var targetLine = [];
+  var minViable = null;
+
+  for (var amt = 0; amt <= maxRaise; amt += 500000) {{
+    var p = getProjectionParams();
+    p.cash0 = state.cash0 + amt;
+    p.burnChange = state.burnChange;
+    var r = projectScenario(p);
+    var runway = r.runway_months || DATA.engine.max_months;
+    points.push({{ x: amt, y: runway }});
+    targetLine.push({{ x: amt, y: target }});
+
+    if (runway >= target && minViable === null && amt > 0) {{
+      minViable = amt;
+    }}
+  }}
+
+  // Pre-raise runway (amt = 0)
+  var preRaise = points[0].y;
+
+  // Update dynamic summary
+  var headline = document.getElementById('raise-headline');
+  var detail = document.getElementById('raise-detail');
+  var summaryBox = document.getElementById('raise-summary');
+
+  if (headline && detail && summaryBox) {{
+    if (preRaise >= DATA.engine.max_months || (points[0] && projectScenario(getProjectionParams()).default_alive)) {{
+      headline.textContent = 'Already self-sustaining at ' + fmtPct(state.growthRate, 1) + ' MoM growth';
+      detail.textContent = 'Pre-raise runway exceeds ' + DATA.engine.max_months + ' months. '
+        + 'Try lowering the growth rate to see when a raise becomes necessary.';
+      summaryBox.style.borderColor = '#16a34a';
+      summaryBox.style.background = '#f0fdf4';
+    }} else if (minViable !== null) {{
+      headline.textContent = 'Minimum viable raise: $'
+        + (minViable / 1e6).toFixed(1) + 'M (reaches ' + target + '-month target)';
+      detail.textContent = 'Pre-raise runway: ' + preRaise
+        + ' months at ' + fmtPct(state.growthRate, 1) + ' MoM growth.';
+      summaryBox.style.borderColor = '#2563eb';
+      summaryBox.style.background = '#f0f7ff';
+    }} else {{
+      headline.textContent = 'No raise amount in range reaches ' + target + '-month target';
+      detail.textContent = 'Pre-raise runway: ' + preRaise + ' months. Consider reducing burn or increasing growth.';
+      summaryBox.style.borderColor = '#dc2626';
+      summaryBox.style.background = '#fef2f2';
+    }}
+  }}
+
+  // Update chart data
+  charts.raise.data.datasets[0].data = points;
+  charts.raise.data.datasets[1].data = targetLine;
+
+  // Segment coloring: red below target, green above
+  charts.raise.data.datasets[0].segment = {{
+    borderColor: function(ctx2) {{
+      var y = ctx2.p1.parsed.y;
+      return y >= target ? '#16a34a' : '#dc2626';
+    }}
+  }};
+
+  charts.raise.update('none');
 }}
 
 // ---------------------------------------------------------------------------
