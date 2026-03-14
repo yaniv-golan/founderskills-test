@@ -275,6 +275,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="header">
   <h1 id="header-title"></h1>
   <span class="stage-badge" id="stage-badge"></span>
+  <div style="font-size:0.75rem;color:#9ca3af;margin-top:4px;">All values in USD</div>
 </div>
 
 <div class="sanity-strip" id="sanity-strip"></div>
@@ -1187,8 +1188,8 @@ function renderRevenueTab() {
     c.appendChild(createSectionHeader("Monthly Revenue"));
     c.appendChild(createEditableTable("revenue.monthly", [
       { key: "month", label: "Month", type: "text", width: "100px" },
-      { key: "total", label: "Total", type: "number" },
-      { key: "arr", label: "ARR", type: "number" },
+      { key: "total", label: "Total ($)", type: "number" },
+      { key: "arr", label: "ARR ($)", type: "number" },
       { key: "actual", label: "Actual?", type: "bool", width: "60px" }
     ]));
   }
@@ -1199,8 +1200,8 @@ function renderRevenueTab() {
     c.appendChild(createSectionHeader("Quarterly Revenue"));
     c.appendChild(createEditableTable("revenue.quarterly", [
       { key: "quarter", label: "Quarter", type: "text", width: "100px" },
-      { key: "total", label: "Total", type: "number" },
-      { key: "arr", label: "ARR", type: "number" },
+      { key: "total", label: "Total ($)", type: "number" },
+      { key: "arr", label: "ARR ($)", type: "number" },
       { key: "actual", label: "Actual?", type: "bool", width: "60px" }
     ]));
   }
@@ -1237,14 +1238,14 @@ function renderTeamCostsTab() {
     { key: "role", label: "Role", type: "text" },
     { key: "count", label: "Count", type: "number" },
     { key: "start_month", label: "Start Month", type: "month" },
-    { key: "salary_annual", label: "Annual Salary", type: "currency" },
+    { key: "salary_annual", label: "Annual Salary ($)", type: "currency" },
     { key: "geography", label: "Geography", type: "text" },
     { key: "burden_pct", label: "Burden %", type: "pct" }
   ]));
   c.appendChild(createSectionHeader("Monthly Operating Expenses"));
   c.appendChild(createEditableTable("expenses.opex_monthly", [
     { key: "category", label: "Category", type: "text" },
-    { key: "amount", label: "Amount", type: "currency" },
+    { key: "amount", label: "Amount ($)", type: "currency" },
     { key: "start_month", label: "Start Month", type: "month" }
   ]));
   c.appendChild(createSectionHeader("Cost of Goods Sold (COGS)"));
