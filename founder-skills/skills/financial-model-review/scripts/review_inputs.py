@@ -447,6 +447,11 @@ function buildSanityStrip() {
 var checkTimeout = null;
 function scheduleCheck() {
   clearTimeout(checkTimeout);
+  /* file:// URLs cannot use fetch — just refresh JS sanity */
+  if (window.location.protocol === "file:") {
+    refreshSanity();
+    return;
+  }
   checkTimeout = setTimeout(function() {
     fetch("/api/check", {
       method: "POST",
@@ -456,7 +461,6 @@ function scheduleCheck() {
       updateWarnings(result.warnings || []);
       if (result.sanity) updateSanityFromServer(result.sanity);
     }).catch(function() {
-      /* Static mode — use JS-computed sanity, no warnings */
       refreshSanity();
     });
   }, 800);
@@ -532,6 +536,15 @@ function refreshCorrectionsBar() {
 }
 
 /* ===== Submit handler ===== */
+function triggerDownload(payload) {
+  var blob = new Blob([payload], { type: "application/json" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "corrections.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 function submitFeedback() {
   var btn = document.getElementById("submit-btn");
   btn.disabled = true;
@@ -544,6 +557,13 @@ function submitFeedback() {
     ils_fields: ilsFields
   }, null, 2);
 
+  /* file:// URLs cannot use fetch — go straight to download */
+  if (window.location.protocol === "file:") {
+    triggerDownload(payload);
+    showOverlay();
+    return;
+  }
+
   fetch("/api/feedback", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -552,12 +572,7 @@ function submitFeedback() {
     if (!resp.ok) throw new Error("Server error");
     showOverlay();
   }).catch(function() {
-    var blob = new Blob([payload], { type: "application/json" });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "corrections.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
+    triggerDownload(payload);
     showOverlay();
   });
 }
