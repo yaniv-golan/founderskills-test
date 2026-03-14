@@ -378,7 +378,9 @@ python3 "$SCRIPTS/visualize.py" --dir "$REVIEW_DIR" -o "$REVIEW_DIR/report.html"
 
 **Present the HTML file path** to the user so they can open the visual report.
 
-### Step 8b: Write Commentary (Quantitative Path Only)
+### Step 8b: Write Commentary (Quantitative Path Only — MANDATORY)
+
+**Do NOT skip this step.** The explorer (Step 8c) depends on `commentary.json` — without the `headline` field, the explorer renders without any narrative context. This step is mandatory for all quantitative reviews.
 
 Write `commentary.json` to `$REVIEW_DIR`. Use the review findings to write specific, actionable narrative for each lens. Reference actual numbers from the review (runway months, metric values, scenario outcomes). Do not use generic advice.
 
