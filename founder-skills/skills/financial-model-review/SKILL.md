@@ -331,7 +331,7 @@ cat <<'CHECK_EOF' | python3 "$SCRIPTS/checklist.py" --pretty -o "$REVIEW_DIR/che
 CHECK_EOF
 ```
 
-**Evidence required:** Always provide `evidence` for `fail` or `warn` items.
+**Evidence is MANDATORY for every item:** Every `fail` and `warn` item MUST have a non-empty `evidence` string explaining WHY it failed/warned, citing specific values from the model. Every `pass` item MUST have `evidence` noting what was checked. Empty evidence produces blank lines in the final report — this is a quality gate failure.
 
 Instruct Sub-agent A: **Return ONLY a short JSON object** with keys: `path`, `score_pct`, `overall_status`, `top_issues` (array of max 3 strings). Do not return tables, recommendations, category breakdowns, or any other text. Keep total output under 500 characters.
 

@@ -1598,6 +1598,8 @@ _CONTRIBUTING_FIELDS: dict[str, list[str]] = {
     "EXPENSE_COVERAGE_SUSPECT": ["cash.monthly_net_burn", "revenue.mrr.value", "expenses"],
     "CASH_ZERO_SUSPECT": ["cash.current_balance"],
     "ARR_MRR_MISMATCH": ["revenue.mrr.value", "revenue.arr.value"],
+    "TIMESERIES_MRR_MISMATCH": ["revenue.mrr.value"],
+    "TIMESERIES_ARR_MISMATCH": ["revenue.arr.value"],
 }
 
 # Map warning codes to the tab they should display in
@@ -1620,6 +1622,8 @@ _WARNING_TAB: dict[str, str] = {
     "TYPE_ERROR": "company",
     "BURN_SIGN_ERROR": "cash",
     "DERIVED_METRIC_REDUNDANT": "ue",
+    "TIMESERIES_MRR_MISMATCH": "revenue",
+    "TIMESERIES_ARR_MISMATCH": "revenue",
 }
 
 

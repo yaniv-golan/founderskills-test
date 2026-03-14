@@ -391,6 +391,47 @@ def _validate_consistency(inputs: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
 
+    # Latest monthly revenue total ~ MRR
+    revenue = inputs.get("revenue") or {}
+    monthly_series = revenue.get("monthly") if isinstance(revenue, dict) else None
+    if isinstance(monthly_series, list) and monthly_series:
+        # Find the latest entry with a total
+        sorted_months = sorted(
+            [e for e in monthly_series if isinstance(e, dict) and isinstance(e.get("total"), (int, float))],
+            key=lambda e: e.get("month", ""),
+            reverse=True,
+        )
+        if sorted_months:
+            latest = sorted_months[0]
+            latest_total = latest["total"]
+            latest_month = latest.get("month", "?")
+            if isinstance(mrr, (int, float)) and mrr != 0 and not _approx_eq(latest_total, mrr):
+                warnings.append(
+                    {
+                        "code": "TIMESERIES_MRR_MISMATCH",
+                        "message": (
+                            f"Latest monthly revenue ({latest_month}: {latest_total:,.0f}) "
+                            f"does not match MRR ({mrr:,.0f}) within 20%"
+                        ),
+                        "field": "revenue.monthly",
+                        "layer": 2,
+                    }
+                )
+            if isinstance(arr, (int, float)) and arr != 0:
+                annualized = latest_total * 12
+                if not _approx_eq(annualized, arr):
+                    warnings.append(
+                        {
+                            "code": "TIMESERIES_ARR_MISMATCH",
+                            "message": (
+                                f"Latest monthly revenue * 12 ({annualized:,.0f}) "
+                                f"does not match ARR ({arr:,.0f}) within 20%"
+                            ),
+                            "field": "revenue.monthly",
+                            "layer": 2,
+                        }
+                    )
+
     return warnings
 
 
