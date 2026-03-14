@@ -205,7 +205,11 @@ INPUTS_EOF
 
 **Path A — File extraction** (`model_format` is `spreadsheet` or `partial`):
 
-**IMPORTANT:** Do NOT show a summary table, preview, or confirmation dialog before launching the review page. Go straight to generating and launching the HTML viewer — it IS the review interface. Do not ask the founder to confirm values in chat first.
+**MANDATORY — READ THIS FIRST:**
+1. Do NOT show a summary table, preview, or confirmation dialog in chat. Do NOT ask the founder to confirm values in chat. Do NOT present extracted values as a message.
+2. Generate the HTML review page IMMEDIATELY using the commands below.
+3. Present the file path or URL to the founder so they can open it. In Cowork, present the full `file://` path.
+4. The HTML page IS the review interface — all review happens there, not in chat.
 
 **Environment detection:** If you are in Cowork (VM, no display, `/sessions/` path), use **static mode**. Otherwise (Claude Code, local terminal), use **server mode**.
 
