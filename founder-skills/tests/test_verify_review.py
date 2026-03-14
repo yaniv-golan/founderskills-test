@@ -496,7 +496,7 @@ class TestContentQuality:
         assert rc == 0
         assert out["status"] == "pass"
         inputs_issues = out["artifacts"]["inputs.json"]["issues"]
-        assert any("current_balance" in i["message"] and i["level"] == "warning" for i in inputs_issues)
+        assert any("current_balance" in i["message"] and i["severity"] == "warning" for i in inputs_issues)
 
     def test_null_monthly_net_burn_warns(self):
         """Null cash.monthly_net_burn produces a warning but still passes (exit 0)."""
@@ -507,7 +507,7 @@ class TestContentQuality:
         assert rc == 0
         assert out["status"] == "pass"
         inputs_issues = out["artifacts"]["inputs.json"]["issues"]
-        assert any("monthly_net_burn" in i["message"] and i["level"] == "warning" for i in inputs_issues)
+        assert any("monthly_net_burn" in i["message"] and i["severity"] == "warning" for i in inputs_issues)
 
     def test_null_company_name_fails(self):
         """Null company name in inputs.json is an error."""

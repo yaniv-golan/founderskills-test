@@ -76,7 +76,7 @@ def _approx_eq(a: float | int | None, b: float | int | None, threshold: float = 
 
 def _issue(level: str, message: str) -> dict[str, str]:
     """Create an issue dict."""
-    return {"level": level, "message": message}
+    return {"severity": level, "message": message}
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ def verify(dir_path: str, gate: int = 2) -> dict[str, Any]:
     for _name, entry in artifacts.items():
         for issue in entry.get("issues", []):
             total_checks += 1
-            if issue["level"] == "error":
+            if issue["severity"] == "error":
                 all_errors.append(issue["message"])
                 failed += 1
             else:
@@ -402,7 +402,7 @@ def verify(dir_path: str, gate: int = 2) -> dict[str, Any]:
 
     for cc in cross_checks:
         total_checks += 1
-        if cc["level"] == "error":
+        if cc["severity"] == "error":
             all_errors.append(cc["message"])
             failed += 1
         else:
@@ -429,7 +429,7 @@ def verify(dir_path: str, gate: int = 2) -> dict[str, Any]:
     return {
         "status": status,
         "artifacts": clean_artifacts,
-        "cross_checks": [{"severity": cc["level"], "message": cc["message"]} for cc in cross_checks],
+        "cross_checks": [{"severity": cc["severity"], "message": cc["message"]} for cc in cross_checks],
         "summary": {
             "total_checks": total_checks,
             "passed": passed,
