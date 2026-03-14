@@ -305,10 +305,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="overlay" id="overlay">
   <div class="overlay-box">
     <h2>Feedback Submitted</h2>
-    <p>Your corrections have been saved.</p>
-    <p style="margin-top:1rem;color:#9ca3af;font-size:0.85rem;">
-      Go back to your session and tell the reviewer you're done.
-    </p>
+    <p id="overlay-msg">Your corrections have been saved.</p>
+    <p id="overlay-hint" style="margin-top:1rem;color:#9ca3af;font-size:0.85rem;"></p>
   </div>
 </div>
 
@@ -692,6 +690,12 @@ function submitFeedback() {
 function showOverlay() {
   var btn = document.getElementById("submit-btn");
   btn.textContent = "Submitted";
+  var hint = document.getElementById("overlay-hint");
+  if (window.location.protocol === "file:") {
+    hint.textContent = "Go back to your session and upload the corrections.json file.";
+  } else {
+    hint.textContent = "Go back to your session and tell Claude you\u2019re done.";
+  }
   document.getElementById("overlay").classList.add("show");
 }
 
