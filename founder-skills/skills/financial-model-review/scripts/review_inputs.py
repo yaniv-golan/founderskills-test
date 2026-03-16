@@ -409,6 +409,15 @@ function markChanged(path) {
 }
 
 /* ===== Formatting helpers ===== */
+function fmtNumber(v) {
+  if (v == null || v === "") return "";
+  var n = Number(String(v).replace(/,/g, ""));
+  if (isNaN(n)) return String(v);
+  // Preserve decimals up to 2 places, drop trailing zeros
+  var frac = n % 1 !== 0 ? 2 : 0;
+  return n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: frac });
+}
+function stripCommas(s) { return String(s).replace(/,/g, ""); }
 function fmtCurrency(v) {
   if (v == null) return "\u2014";
   return "$" + Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
@@ -768,10 +777,12 @@ function createNumberInput(path, label, opts) {
   input.className = "input-field";
   input.dataset.path = path;
   var val = getByPath(state, path);
-  input.value = val != null ? String(val) : "";
+  input.value = fmtNumber(val);
+  input.addEventListener("focus", function() { this.value = stripCommas(this.value); });
+  input.addEventListener("blur", function() { this.value = fmtNumber(this.value); });
   input.addEventListener("input", function() {
     if (this.value === "") { updateField(path, null); return; }
-    var n = Number(this.value);
+    var n = Number(stripCommas(this.value));
     if (!isNaN(n)) updateField(path, n);
   });
   fg.wrapper.appendChild(input);
@@ -818,10 +829,12 @@ function createCurrencyInput(path, label, opts) {
   input.dataset.path = path;
   input.style.flex = "1";
   var val = getByPath(state, path);
-  input.value = val != null ? String(val) : "";
+  input.value = fmtNumber(val);
+  input.addEventListener("focus", function() { this.value = stripCommas(this.value); });
+  input.addEventListener("blur", function() { this.value = fmtNumber(this.value); });
   input.addEventListener("input", function() {
     if (this.value === "") { updateField(path, null); return; }
-    var n = Number(this.value.replace(/,/g, ""));
+    var n = Number(stripCommas(this.value));
     if (!isNaN(n)) updateField(path, n);
   });
   row.appendChild(input);
@@ -1033,14 +1046,20 @@ function createEditableTable(arrayPath, columns) {
           if (col.type === "month") inp.placeholder = "YYYY-MM";
           if (col.type === "pct" && val != null) {
             inp.value = String(Math.round(val * 10000) / 100);
+          } else if ((col.type === "number" || col.type === "currency") && val != null) {
+            inp.value = fmtNumber(val);
           } else {
             inp.value = val != null ? String(val) : "";
+          }
+          if (col.type === "number" || col.type === "currency") {
+            inp.addEventListener("focus", function() { this.value = stripCommas(this.value); });
+            inp.addEventListener("blur", function() { this.value = fmtNumber(this.value); });
           }
           inp.addEventListener("input", (function(ri, ck, ct) {
             return function() {
               var newVal;
               if (ct === "number" || ct === "currency") {
-                newVal = this.value === "" ? null : Number(this.value.replace(/,/g, ""));
+                newVal = this.value === "" ? null : Number(stripCommas(this.value));
                 if (this.value !== "" && isNaN(newVal)) return;
               } else if (ct === "pct") {
                 if (this.value === "") newVal = null;
