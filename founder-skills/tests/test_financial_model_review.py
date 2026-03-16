@@ -97,6 +97,18 @@ def test_extract_model_stdin_passthrough() -> None:
     assert data["sheets"][0]["name"] == "Manual"
 
 
+def test_extract_model_pre_header_rows_csv() -> None:
+    """CSV extraction includes pre_header_rows field (always empty for CSV)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        f.write("Month,Revenue\n2025-01,50000\n")
+        f.flush()
+        rc, data, stderr = run_script("extract_model.py", ["--file", f.name, "--pretty"])
+    os.unlink(f.name)
+    assert rc == 0
+    assert "pre_header_rows" in data["sheets"][0]
+    assert data["sheets"][0]["pre_header_rows"] == []
+
+
 def test_extract_model_nonexistent_file() -> None:
     rc, data, stderr = run_script("extract_model.py", ["--file", "/tmp/nonexistent.xlsx"])
     assert rc == 1

@@ -28,6 +28,7 @@ Accept any format: Excel (.xlsx), CSV, Google Sheets exports, financial document
 All scripts are at `${CLAUDE_PLUGIN_ROOT}/skills/financial-model-review/scripts/`:
 
 - **`extract_model.py`** — Extracts structured data from Excel (.xlsx) and CSV files
+- **`validate_extraction.py`** — Anti-hallucination gate: cross-references `model_data.json` against `inputs.json` to catch mismatches (company name, salary, revenue, cash traceability); run after extraction, before review
 - **`validate_inputs.py`** — Four-layer validation of `inputs.json` (structural, consistency, sanity, completeness); supports `--fix` to auto-correct sign errors
 - **`checklist.py`** — Scores 46 criteria across 7 categories with profile-based auto-gating
 - **`unit_economics.py`** — Computes and benchmarks 11 unit economics metrics
@@ -156,7 +157,7 @@ If the script prints a `sector_type` warning but exits 0, that's non-fatal — p
 
 ### Step 2: Extract Model Data and Build `inputs.json`
 
-**When Excel (.xlsx) or CSV files are provided,** spawn a `general-purpose` Task sub-agent to handle extraction and input construction. The sub-agent receives: file path, `SCRIPTS`, `REFS`, `SHARED_REFS`, and `REVIEW_DIR` paths. **Do NOT use `isolation: "worktree"`** — files written in a worktree won't appear in the main `$REVIEW_DIR`.
+**When Excel (.xlsx) or CSV files are provided,** spawn a `general-purpose` Task sub-agent to handle extraction and input construction. The sub-agent receives: file path, `SCRIPTS`, `REFS`, `SHARED_REFS`, and `REVIEW_DIR` paths. **Do NOT use `isolation: "worktree"`** — files written in a worktree won't appear in the main `$REVIEW_DIR`. **Save the sub-agent's ID** — you may need to resume it in Step 2.5 if extraction validation fails.
 
 The sub-agent:
 1. Runs `extract_model.py --file <path> --pretty -o "$REVIEW_DIR/model_data.json"` (note: `--file`, not positional)
@@ -185,15 +186,29 @@ Instruct the sub-agent: **Do not run any scripts other than `extract_model.py`. 
 
 3. **Expense cross-check.** After extracting headcount and opex, verify that the sum roughly matches the model's total expense row or the implied burn (burn = expenses − revenue). If extracted expenses cover less than 50% of the stated `monthly_net_burn + revenue`, critical cost categories were likely missed — re-examine the source data for department-level line items. Validation will flag this as `EXPENSE_COVERAGE_SUSPECT`.
 
-After the sub-agent returns, **proceed to Step 3: Review Extracted Values** for founder confirmation before continuing.
+After the sub-agent returns, **proceed to Step 2.5: Validate Extraction** before continuing.
+
+### Step 2.5: Validate Extraction — Anti-Hallucination Gate
+
+Run the extraction validation script to cross-reference `model_data.json` against `inputs.json`:
+
+```bash
+python3 "$SCRIPTS/validate_extraction.py" --inputs "$REVIEW_DIR/inputs.json" --model-data "$REVIEW_DIR/model_data.json" --pretty -o "$REVIEW_DIR/extraction_validation.json"
+```
+
+**If `status` is `"warn"`:** Check `correction_hints` for specific issues. Resume the extraction sub-agent (using the saved agent ID from Step 2) with the correction hints and ask it to fix the flagged values. Then re-run the validation. **Maximum 2 retries** — if warnings persist after 2 attempts, proceed to Step 3 with the warnings intact; they will appear as a banner in the review page for the founder to see.
+
+**If `status` is `"pass"` or `"skip"`:** Proceed to Step 3.
+
+Pass `$REVIEW_DIR/extraction_validation.json` to Step 3 so it can be displayed in the review page.
 
 **When documents (PDFs, data room dumps, Google Sheets exports) are provided,** use a two-pass sub-agent flow:
 
-1. **Probe pass:** Spawn a `general-purpose` Task sub-agent with the file path(s), `SCRIPTS`, `REFS`, `SHARED_REFS`, and `REVIEW_DIR` paths. The sub-agent reads the document(s), reads `$REFS/schema-inputs.md` for the schema, extracts what it can, and returns ONLY: (1) partial data extracted (company name, stage, sector, any metrics found), (2) `model_format`, (3) a list of fields that could not be extracted, and (4) any `company.traits` detected. Save the sub-agent's ID for resumption.
+1. **Probe pass:** Spawn a `general-purpose` Task sub-agent with the file path(s), `SCRIPTS`, `REFS`, `SHARED_REFS`, and `REVIEW_DIR` paths. The sub-agent reads the document(s), reads `$REFS/schema-inputs.md` for the schema, extracts what it can, and returns ONLY: (1) partial data extracted (company name, stage, sector, any metrics found), (2) `model_format`, (3) a list of fields that could not be extracted, and (4) any `company.traits` detected. Save the sub-agent's ID for resumption. **Important:** Always prefer explicit labeled fields in the spreadsheet (e.g., a "Company Name" cell in a Controls/Settings tab) over filenames or cover page text when extracting company identity fields.
 
 2. **Build pass:** Resume the same sub-agent (using `resume` with the saved agent ID — preserves full document context). Pass the founder's answers from Step 1 to fill any gaps. The sub-agent reads `$REFS/data-sufficiency.md`, constructs `inputs.json`, and writes it to `$REVIEW_DIR/inputs.json`. Returns ONLY: (1) file paths written, (2) data sufficiency verdict (sufficient/insufficient + count of missing critical fields), (3) final `model_format`, and (4) **confidence per key field** — for each extracted metric, report `high`, `low`, or `missing`.
 
-After the sub-agent returns, **proceed to Step 3: Review Extracted Values** for founder confirmation before continuing.
+After the sub-agent returns, **proceed to Step 2.5: Validate Extraction** (same as the spreadsheet path above) before continuing to Step 3.
 
 **When conversational input is provided (no files):** Handle directly in the main agent — the data is already in the conversation. Gather all needed fields within Step 1 through normal conversation (not via `AskUserQuestion` after extraction starts). Ask for: revenue figures, cost structure, headcount, funding history, growth rates, key assumptions. Consult `references/schema-inputs.md` for the full schema. Since there are no files to extract, there is no extraction pipeline to block — but all data gathering must complete before dispatching sub-agents in Steps 4-6.
 
@@ -218,7 +233,7 @@ INPUTS_EOF
 #### Server mode (Claude Code)
 
 ```bash
-python3 "$SCRIPTS/review_inputs.py" "$REVIEW_DIR/inputs.json" --workspace "$REVIEW_DIR" &
+python3 "$SCRIPTS/review_inputs.py" "$REVIEW_DIR/inputs.json" --workspace "$REVIEW_DIR" --extraction-warnings "$REVIEW_DIR/extraction_validation.json" &
 VIEWER_PID=$!
 ```
 
@@ -236,7 +251,7 @@ python3 "$SCRIPTS/apply_corrections.py" "$REVIEW_DIR/corrections.json" --origina
 #### Static mode (Cowork)
 
 ```bash
-python3 "$SCRIPTS/review_inputs.py" "$REVIEW_DIR/inputs.json" --static "$REVIEW_DIR/review.html"
+python3 "$SCRIPTS/review_inputs.py" "$REVIEW_DIR/inputs.json" --static "$REVIEW_DIR/review.html" --extraction-warnings "$REVIEW_DIR/extraction_validation.json"
 ```
 
 Tell the founder:

@@ -28,6 +28,7 @@ Structured extraction of the spreadsheet contents for downstream analysis.
 | `periodicity` | string | yes | One of: `"monthly"`, `"quarterly"`, `"annual"`, `"unknown"`. Detected from column headers via regex and majority vote. |
 | `row_count` | integer | yes | Number of data rows |
 | `col_count` | integer | yes | Number of columns |
+| `pre_header_rows` | any[][] | yes | Rows before the detected header row (xlsx: rows above header containing company name, logos, etc.; csv: always empty `[]`). `validate_extraction.py` treats a missing key as `[]` for backward compatibility with older model_data files. |
 
 **Example:**
 ```json

@@ -240,6 +240,11 @@ def extract_xlsx(file_path: str) -> dict[str, Any]:
             headers = [f"col_{j}" for j in range(ncols)]
             rows_data = all_rows
 
+        # Rows before the detected header (company name, logos, etc.)
+        pre_header: list[list[Any]] = []
+        if header_idx > 0:
+            pre_header = all_rows[:header_idx]
+
         sheets.append(
             {
                 "name": ws.title,
@@ -249,6 +254,7 @@ def extract_xlsx(file_path: str) -> dict[str, Any]:
                 "periodicity": detect_periodicity(headers),
                 "row_count": len(rows_data),
                 "col_count": len(headers),
+                "pre_header_rows": pre_header,
             }
         )
     wb.close()
@@ -310,6 +316,7 @@ def extract_csv(file_path: str) -> dict[str, Any]:
             "periodicity": detect_periodicity(headers),
             "row_count": len(rows_data),
             "col_count": len(headers),
+            "pre_header_rows": [],
         }
     ]
     return {

@@ -1411,15 +1411,63 @@ init();
 # ---------------------------------------------------------------------------
 
 
-def _build_html(inputs: dict[str, Any]) -> str:
+def _build_html(inputs: dict[str, Any], extraction_warnings: dict[str, Any] | None = None) -> str:
     """Inject embedded data into the HTML template."""
     data_js = f"const DATA = {json.dumps(inputs)};"
-    return _HTML_TEMPLATE.replace("/*__EMBEDDED_DATA__*/", data_js)
+    html = _HTML_TEMPLATE.replace("/*__EMBEDDED_DATA__*/", data_js)
+
+    # Inject extraction warnings banner above the warnings container
+    if extraction_warnings and extraction_warnings.get("status") == "warn":
+        banner = _extraction_warnings_html(extraction_warnings)
+        html = html.replace('<div id="warnings-container">', banner + '\n<div id="warnings-container">')
+
+    return html
 
 
-def _write_static(inputs: dict[str, Any], output_path: str) -> None:
+def _extraction_warnings_html(ew: dict[str, Any]) -> str:
+    """Build static HTML banner for extraction validation warnings."""
+    checks = ew.get("checks", [])
+    warns = [c for c in checks if c.get("status") == "warn"]
+    if not warns:
+        return ""
+
+    cards: list[str] = []
+    for w in warns:
+        msg = w.get("message", "")
+        detail = ""
+        if w.get("candidates"):
+            detail = f' <span style="color:#6b7280;font-size:0.8rem">(candidates: {", ".join(w["candidates"][:3])})</span>'
+        if w.get("untraceable"):
+            items = w["untraceable"]
+            if w["id"] == "SALARY_TRACEABILITY":
+                names = [u.get("role", "?") for u in items]
+                detail = f' <span style="color:#6b7280;font-size:0.8rem">({", ".join(names)})</span>'
+            elif w["id"] == "REVENUE_TRACEABILITY":
+                names = [u.get("field", "?") for u in items]
+                detail = f' <span style="color:#6b7280;font-size:0.8rem">({", ".join(names)})</span>'
+        cards.append(
+            f'<div class="extraction-warn-card" style="background:#fef2f2;border-left:4px solid #ef4444;'
+            f'padding:0.75rem 1rem;margin-bottom:0.5rem;border-radius:4px;'
+            f'display:flex;justify-content:space-between;align-items:center;">'
+            f'<span style="color:#991b1b;font-size:0.9rem">{msg}{detail}</span>'
+            f'<button onclick="this.parentElement.remove()" style="background:none;border:1px solid #dc2626;'
+            f'color:#dc2626;padding:0.25rem 0.5rem;border-radius:4px;cursor:pointer;font-size:0.8rem;'
+            f'flex-shrink:0;margin-left:12px;">Dismiss</button>'
+            f'</div>'
+        )
+
+    return (
+        '<div id="extraction-warnings" style="padding:0 32px;margin-bottom:8px;">'
+        '<div style="font-size:0.8rem;font-weight:600;color:#991b1b;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">'
+        'Extraction Warnings</div>'
+        + "\n".join(cards)
+        + '</div>'
+    )
+
+
+def _write_static(inputs: dict[str, Any], output_path: str, extraction_warnings: dict[str, Any] | None = None) -> None:
     """Write self-contained HTML to a file, print JSON status to stdout."""
-    html = _build_html(inputs)
+    html = _build_html(inputs, extraction_warnings=extraction_warnings)
     with open(output_path, "w") as f:
         f.write(html)
     abs_path = os.path.abspath(output_path)
@@ -1706,6 +1754,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     workspace: str = ""
     inputs_path: str = ""
+    extraction_warnings_path: str = ""
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Suppress request logging."""
@@ -1725,7 +1774,14 @@ class _Handler(BaseHTTPRequestHandler):
                     inputs = json.load(f)
             except Exception:
                 inputs = {}
-            html = _build_html(inputs)
+            ew: dict[str, Any] | None = None
+            if self.extraction_warnings_path:
+                try:
+                    with open(self.extraction_warnings_path) as ewf:
+                        ew = json.load(ewf)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            html = _build_html(inputs, extraction_warnings=ew)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -1895,13 +1951,14 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
 
-def _serve(inputs_path: str, workspace: str, port: int = 3117) -> None:
+def _serve(inputs_path: str, workspace: str, port: int = 3117, extraction_warnings_path: str = "") -> None:
     """Start the HTTP server and open the browser."""
     if port != 0:
         _kill_port(port)
 
     _Handler.workspace = workspace
     _Handler.inputs_path = inputs_path
+    _Handler.extraction_warnings_path = extraction_warnings_path
 
     try:
         server = HTTPServer(("127.0.0.1", port), _Handler)
@@ -1957,6 +2014,11 @@ def main() -> None:
         metavar="FILE",
         help="Alias for --static (write HTML to FILE)",
     )
+    parser.add_argument(
+        "--extraction-warnings",
+        metavar="FILE",
+        help="Path to extraction_validation.json for extraction warning banner",
+    )
     args = parser.parse_args()
 
     # Read inputs
@@ -1967,12 +2029,22 @@ def main() -> None:
         print(f"Error reading {args.inputs}: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Load extraction warnings if provided
+    ew: dict[str, Any] | None = None
+    ew_path = getattr(args, "extraction_warnings", None) or ""
+    if ew_path:
+        try:
+            with open(ew_path) as ewf:
+                ew = json.load(ewf)
+        except (OSError, json.JSONDecodeError):
+            pass
+
     output = args.static or args.o
     if output:
-        _write_static(inputs, output)
+        _write_static(inputs, output, extraction_warnings=ew)
     elif args.workspace:
         os.makedirs(args.workspace, exist_ok=True)
-        _serve(os.path.abspath(args.inputs), args.workspace, port=args.port)
+        _serve(os.path.abspath(args.inputs), args.workspace, port=args.port, extraction_warnings_path=ew_path)
     else:
         print(
             "Error: provide --static <file> for static mode or --workspace <dir> for server mode",
