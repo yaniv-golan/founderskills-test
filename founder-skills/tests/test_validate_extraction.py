@@ -239,6 +239,33 @@ class TestWarnConditions:
         checks_by_id = {c["id"]: c for c in data["checks"]}
         assert checks_by_id["CASH_BALANCE"]["status"] == "warn"
 
+    def test_scale_plausibility_low_cash(self) -> None:
+        """Warn when cash balance is implausibly low for stage."""
+        inputs = json.loads(json.dumps(_INPUTS))
+        inputs["cash"]["current_balance"] = 4000  # $4K — model in thousands?
+        rc, data, _ = _run(inputs, _MODEL_DATA)
+        assert rc == 0
+        checks_by_id = {c["id"]: c for c in data["checks"]}
+        assert checks_by_id["SCALE_PLAUSIBILITY"]["status"] == "warn"
+        assert any("thousand" in h.lower() or "million" in h.lower() for h in data["correction_hints"])
+
+    def test_scale_plausibility_indicator_in_header(self) -> None:
+        """Warn when model has ($000) scale indicator."""
+        model = json.loads(json.dumps(_MODEL_DATA))
+        model["sheets"][0]["headers"][0] = "Line Item ($000)"
+        rc, data, _ = _run(_INPUTS, model)
+        assert rc == 0
+        checks_by_id = {c["id"]: c for c in data["checks"]}
+        assert checks_by_id["SCALE_PLAUSIBILITY"]["status"] == "warn"
+        assert any("($000)" in s for s in checks_by_id["SCALE_PLAUSIBILITY"].get("signals", []))
+
+    def test_scale_plausibility_pass(self) -> None:
+        """Pass when values are plausible for stage."""
+        rc, data, _ = _run(_INPUTS, _MODEL_DATA)
+        assert rc == 0
+        checks_by_id = {c["id"]: c for c in data["checks"]}
+        assert checks_by_id["SCALE_PLAUSIBILITY"]["status"] == "pass"
+
 
 # ---------------------------------------------------------------------------
 # Pre-header tests

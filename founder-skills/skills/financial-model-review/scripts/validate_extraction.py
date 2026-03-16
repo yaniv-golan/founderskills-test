@@ -296,6 +296,96 @@ def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any]) -> d
     }
 
 
+def _detect_scale_indicator(model_data: dict[str, Any]) -> str | None:
+    """Look for explicit scale indicators like ($000), (in thousands), etc."""
+    patterns = ["($000)", "(in thousands)", "($k)", "(in $k)", "(000s)",
+                "($m)", "(in millions)", "(in $m)"]
+    for sheet in model_data.get("sheets", []):
+        for h in sheet.get("headers", []):
+            if isinstance(h, str):
+                for p in patterns:
+                    if p in h.lower():
+                        return p
+        for row in sheet.get("pre_header_rows", []):
+            for cell in row:
+                if isinstance(cell, str):
+                    for p in patterns:
+                        if p in cell.lower():
+                            return p
+        # Check first 3 data rows too
+        for row in sheet.get("rows", [])[:3]:
+            for cell in row:
+                if isinstance(cell, str):
+                    for p in patterns:
+                        if p in cell.lower():
+                            return p
+    return None
+
+
+# Stage-based plausibility ranges for monthly values (USD)
+_STAGE_RANGES: dict[str, dict[str, tuple[float, float]]] = {
+    "pre-seed": {"cash_balance": (10_000, 50_000_000), "monthly_burn": (1_000, 500_000)},
+    "seed":     {"cash_balance": (50_000, 100_000_000), "monthly_burn": (5_000, 2_000_000)},
+    "series-a": {"cash_balance": (500_000, 500_000_000), "monthly_burn": (50_000, 10_000_000)},
+    "series-b": {"cash_balance": (1_000_000, 1_000_000_000), "monthly_burn": (100_000, 50_000_000)},
+}
+
+
+def _check_scale_plausibility(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
+    """SCALE_PLAUSIBILITY: detect when monetary values look like they're still in thousands/millions."""
+    stage = inputs.get("company", {}).get("stage", "seed")
+    cash = inputs.get("cash", {}).get("current_balance")
+    burn = inputs.get("cash", {}).get("monthly_net_burn")
+    headcount_entries = inputs.get("expenses", {}).get("headcount", [])
+    total_headcount = sum(h.get("count", 0) for h in headcount_entries if isinstance(h, dict))
+
+    signals: list[str] = []
+
+    # Check for explicit scale indicator in model
+    scale_indicator = _detect_scale_indicator(model_data)
+    if scale_indicator:
+        signals.append(f"Model contains scale indicator: {scale_indicator}")
+
+    # Cash balance sanity
+    ranges = _STAGE_RANGES.get(stage, _STAGE_RANGES["seed"])
+    if cash is not None and cash > 0:
+        low, _high = ranges["cash_balance"]
+        if cash < low:
+            signals.append(f"Cash balance ${cash:,.0f} implausibly low for {stage} stage (min ~${low:,.0f})")
+
+    # Burn sanity — if we have headcount, burn should cover at least basic salaries
+    if burn is not None and burn > 0 and total_headcount > 0:
+        # Minimum plausible monthly burn: $2K/person (even for low-cost geographies)
+        min_burn = total_headcount * 2_000
+        if burn < min_burn:
+            signals.append(
+                f"Monthly burn ${burn:,.0f} too low for {total_headcount} employees "
+                f"(implies ${burn / total_headcount:,.0f}/person/month)"
+            )
+
+    # Salary sanity — check if any salary is implausibly low
+    for h in headcount_entries:
+        salary = h.get("salary_annual", 0)
+        if salary and salary > 0 and salary < 10_000:
+            signals.append(
+                f"Annual salary ${salary:,.0f} for '{h.get('role', '?')}' implausibly low — "
+                f"model may be in thousands (${salary * 1000:,.0f}?)"
+            )
+
+    if signals:
+        return {
+            "id": "SCALE_PLAUSIBILITY",
+            "status": "warn",
+            "message": "Values may not be converted from model denomination (thousands/millions)",
+            "signals": signals,
+        }
+    return {
+        "id": "SCALE_PLAUSIBILITY",
+        "status": "pass",
+        "message": "Monetary values appear plausible for stated stage",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -334,6 +424,7 @@ def validate(inputs: dict[str, Any], model_data: dict[str, Any] | None) -> dict[
         _check_salary_traceability(inputs, model_data),
         _check_revenue_traceability(inputs, model_data),
         _check_cash_balance(inputs, model_data),
+        _check_scale_plausibility(inputs, model_data),
     ]
 
     warnings = [c for c in checks if c["status"] == "warn"]
@@ -359,6 +450,12 @@ def validate(inputs: dict[str, Any], model_data: dict[str, Any] | None) -> dict[
         elif cid == "CASH_BALANCE":
             correction_hints.append(
                 f"Cash balance {w.get('message', '')} — verify against source"
+            )
+        elif cid == "SCALE_PLAUSIBILITY":
+            sigs = w.get("signals", [])
+            correction_hints.append(
+                "Model may be denominated in thousands/millions — multiply monetary values by 1000 or 1000000. "
+                + "; ".join(sigs[:3])
             )
 
     return {
