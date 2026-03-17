@@ -243,8 +243,8 @@ INPUTS_EOF
 #### Server mode (Claude Code)
 
 ```bash
+pkill -f "review_inputs.py.*--workspace" 2>/dev/null  # kill any stale viewer from a previous run
 python3 "$SCRIPTS/review_inputs.py" "$REVIEW_DIR/inputs.json" --workspace "$REVIEW_DIR" --extraction-warnings "$REVIEW_DIR/extraction_validation.json" &
-VIEWER_PID=$!
 ```
 
 Tell the founder:
@@ -254,7 +254,7 @@ Tell the founder:
 Wait for the founder to say they're done.
 
 ```bash
-kill $VIEWER_PID 2>/dev/null
+pkill -f "review_inputs.py.*--workspace" 2>/dev/null
 python3 "$SCRIPTS/apply_corrections.py" "$REVIEW_DIR/corrections.json" --original "$REVIEW_DIR/inputs.json" --output-dir "$REVIEW_DIR"
 ```
 
@@ -273,6 +273,8 @@ Wait for the founder to upload `corrections.json`.
 ```bash
 python3 "$SCRIPTS/apply_corrections.py" <uploaded-file> --original "$REVIEW_DIR/inputs.json" --output-dir "$REVIEW_DIR"
 ```
+
+> `apply_corrections.py` accepts both patch-based payloads (v2: `changes[]` + `base_hash`) and legacy payloads (v1: `corrected` object). The review UI emits v2 format. If applying a manually constructed corrections file, use the v2 format.
 
 #### After apply_corrections (both modes)
 

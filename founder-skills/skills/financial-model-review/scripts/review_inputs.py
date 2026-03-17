@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import hashlib
 import json
 import os
 import signal
@@ -320,6 +321,7 @@ const corrections = new Map();
 const ilsFields = {};
 const warningOverrides = new Map();
 const accordionState = {};
+var structurallyModified = new Set();
 let activeTab = "company";
 
 /* ===== Path helpers ===== */
@@ -670,11 +672,81 @@ function submitFeedback() {
   btn.disabled = true;
   btn.textContent = "Submitting...";
 
+  /* Known editable array paths */
+  var ARRAY_PATHS = [
+    "expenses.headcount", "expenses.opex_monthly",
+    "revenue.monthly", "revenue.quarterly"
+  ];
+
+  var changes = [];
+  var structuralPrefixes = [];
+
+  // 1. Emit replace_array for each structurally modified array
+  var fxRate = getByPath(state, "israel_specific.fx_rate_ils_usd") || 0;
+  ARRAY_PATHS.forEach(function(ap) {
+    if (!structurallyModified.has(ap)) return;
+    var orig = getByPath(ORIGINAL, ap) || [];
+    var curr = getByPath(state, ap) || [];
+    // Skip if array was modified but returned to exactly original state
+    if (JSON.stringify(orig) === JSON.stringify(curr)) return;
+    // STRUCTURAL — emit replace_array with ILS pre-normalization
+    var normalized = JSON.parse(JSON.stringify(curr));
+    if (fxRate > 0) {
+      normalized.forEach(function(row, ri) {
+        if (!row || typeof row !== "object") return;
+        Object.keys(row).forEach(function(k) {
+          var cellPath = ap + "[" + ri + "]." + k;
+          if (ilsFields[cellPath] && typeof row[k] === "number") {
+            row[k] = Math.round((row[k] / fxRate) * 100) / 100;
+          }
+        });
+      });
+    }
+    changes.push({
+      path: ap,
+      type: "replace_array",
+      expected_old: orig.length,
+      "new": normalized
+    });
+    structuralPrefixes.push(ap + "[");
+  });
+
+  // Also suppress child PATCHES for structurally modified arrays that returned
+  // to original (skipped above) — their child corrections are still index-stale.
+  var allStructuralPrefixes = [];
+  structurallyModified.forEach(function(ap) {
+    allStructuralPrefixes.push(ap + "[");
+  });
+
+  // 2. Emit scalar changes, EXCLUDING children of ANY structurally modified array
+  corrections.forEach(function(c) {
+    for (var i = 0; i < allStructuralPrefixes.length; i++) {
+      if (c.path.indexOf(allStructuralPrefixes[i]) === 0) return;
+    }
+    changes.push({
+      path: c.path,
+      expected_old: c.was,
+      "new": c.now
+    });
+  });
+
+  // 3. Filter ils_fields: ONLY remove entries under arrays where replace_array
+  //    actually fired (structuralPrefixes). Arrays that returned to original
+  //    keep their ils_fields.
+  var cleanIlsFields = {};
+  Object.keys(ilsFields).forEach(function(path) {
+    var dominated = false;
+    for (var i = 0; i < structuralPrefixes.length; i++) {
+      if (path.indexOf(structuralPrefixes[i]) === 0) { dominated = true; break; }
+    }
+    if (!dominated) cleanIlsFields[path] = ilsFields[path];
+  });
+
   var payload = JSON.stringify({
-    corrections: Array.from(corrections.values()),
-    corrected: state,
+    base_hash: BASE_HASH,
+    changes: changes,
     warning_overrides: Array.from(warningOverrides.values()),
-    ils_fields: ilsFields
+    ils_fields: cleanIlsFields
   }, null, 2);
 
   /* file:// URLs cannot use fetch — go straight to download */
@@ -1113,6 +1185,7 @@ function createEditableTable(arrayPath, columns) {
       rmBtn.textContent = "\u2715";
       rmBtn.addEventListener("click", (function(ri) {
         return function() {
+          structurallyModified.add(arrayPath);
           var nextArr = getByPath(state, arrayPath) || [];
           nextArr.splice(ri, 1);
           setByPath(state, arrayPath, nextArr);
@@ -1133,6 +1206,7 @@ function createEditableTable(arrayPath, columns) {
   addBtn.className = "add-row-btn";
   addBtn.textContent = "+ Add row";
   addBtn.addEventListener("click", function() {
+    structurallyModified.add(arrayPath);
     var arr = getByPath(state, arrayPath) || [];
     var newRow = {};
     columns.forEach(function(col) { newRow[col.key] = null; });
@@ -1432,7 +1506,9 @@ init();
 
 def _build_html(inputs: dict[str, Any], extraction_warnings: dict[str, Any] | None = None) -> str:
     """Inject embedded data into the HTML template."""
-    data_js = f"const DATA = {json.dumps(inputs)};"
+    canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    base_hash = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    data_js = f"const DATA = {json.dumps(inputs)};\nconst BASE_HASH = {json.dumps(base_hash)};"
     html = _HTML_TEMPLATE.replace("/*__EMBEDDED_DATA__*/", data_js)
 
     # Inject extraction warnings banner above the warnings container
@@ -1455,7 +1531,9 @@ def _extraction_warnings_html(ew: dict[str, Any]) -> str:
         msg = w.get("message", "")
         detail = ""
         if w.get("candidates"):
-            detail = f' <span style="color:#6b7280;font-size:0.8rem">(candidates: {", ".join(w["candidates"][:3])})</span>'
+            detail = (
+                f' <span style="color:#6b7280;font-size:0.8rem">(candidates: {", ".join(w["candidates"][:3])})</span>'
+            )
         if w.get("untraceable"):
             items = w["untraceable"]
             if w["id"] == "SALARY_TRACEABILITY":
@@ -1466,21 +1544,19 @@ def _extraction_warnings_html(ew: dict[str, Any]) -> str:
                 detail = f' <span style="color:#6b7280;font-size:0.8rem">({", ".join(names)})</span>'
         cards.append(
             f'<div class="extraction-warn-card" style="background:#fef2f2;border-left:4px solid #ef4444;'
-            f'padding:0.75rem 1rem;margin-bottom:0.5rem;border-radius:4px;'
+            f"padding:0.75rem 1rem;margin-bottom:0.5rem;border-radius:4px;"
             f'display:flex;justify-content:space-between;align-items:center;">'
             f'<span style="color:#991b1b;font-size:0.9rem">{msg}{detail}</span>'
             f'<button onclick="this.parentElement.remove()" style="background:none;border:1px solid #dc2626;'
-            f'color:#dc2626;padding:0.25rem 0.5rem;border-radius:4px;cursor:pointer;font-size:0.8rem;'
+            f"color:#dc2626;padding:0.25rem 0.5rem;border-radius:4px;cursor:pointer;font-size:0.8rem;"
             f'flex-shrink:0;margin-left:12px;">Dismiss</button>'
-            f'</div>'
+            f"</div>"
         )
 
     return (
         '<div id="extraction-warnings" style="padding:0 32px;margin-bottom:8px;">'
         '<div style="font-size:0.8rem;font-weight:600;color:#991b1b;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">'
-        'Extraction Warnings</div>'
-        + "\n".join(cards)
-        + '</div>'
+        "Extraction Warnings</div>" + "\n".join(cards) + "</div>"
     )
 
 

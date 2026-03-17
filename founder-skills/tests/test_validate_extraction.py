@@ -41,8 +41,10 @@ def _run(
         cmd = [
             sys.executable,
             os.path.join(FMR_SCRIPTS_DIR, "validate_extraction.py"),
-            "--inputs", inputs_path,
-            "--model-data", model_data_path,
+            "--inputs",
+            inputs_path,
+            "--model-data",
+            model_data_path,
             "--pretty",
         ]
         if extra_args:
@@ -177,9 +179,12 @@ class TestPassConditions:
                 [
                     sys.executable,
                     os.path.join(FMR_SCRIPTS_DIR, "validate_extraction.py"),
-                    "--inputs", inputs_path,
-                    "--model-data", model_data_path,
-                    "-o", out_path,
+                    "--inputs",
+                    inputs_path,
+                    "--model-data",
+                    model_data_path,
+                    "-o",
+                    out_path,
                 ],
                 capture_output=True,
                 text=True,
@@ -349,6 +354,52 @@ class TestPeriodicity:
         # salary_annual=120000, monthly=10000, quarterly=30000
         # Model has 360000 quarterly. 120000 * 3 = 360000. Should be traceable.
         assert checks_by_id["SALARY_TRACEABILITY"]["status"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Cell ref provenance tests
+# ---------------------------------------------------------------------------
+
+
+class TestCellRefProvenance:
+    def test_pass_includes_source_refs(self) -> None:
+        """When cell_refs available, pass results include source_refs."""
+        model = json.loads(json.dumps(_MODEL_DATA))
+        model["sheets"][0]["cell_refs"] = [
+            {"row_index": 0, "label": "Revenue", "cols": {"Mar 2025": "D2"}},
+            {"row_index": 1, "label": "Payroll - R&D", "cols": {"Mar 2025": "D3"}},
+            {"row_index": 3, "label": "Cash Balance", "cols": {"Mar 2025": "D5"}},
+        ]
+        rc, data, _ = _run(_INPUTS, model)
+        assert rc == 0
+        checks_by_id = {c["id"]: c for c in data["checks"]}
+        # Revenue check should include structured source_refs
+        rev_check = checks_by_id["REVENUE_TRACEABILITY"]
+        assert rev_check["status"] == "pass"
+        assert "source_refs" in rev_check
+        mrr_ref = rev_check["source_refs"].get("MRR")
+        assert mrr_ref is not None
+        assert mrr_ref["confidence"] == "best_match"
+        assert "!" in mrr_ref["ref"]  # e.g. "P&L!D2"
+
+        # Cash check should include structured source_refs
+        cash_check = checks_by_id["CASH_BALANCE"]
+        assert cash_check["status"] == "pass"
+        assert "source_refs" in cash_check
+        cb_ref = cash_check["source_refs"]["current_balance"]
+        assert cb_ref["confidence"] == "best_match"
+
+        # Salary check should include structured source_refs
+        sal_check = checks_by_id["SALARY_TRACEABILITY"]
+        assert sal_check["status"] == "pass"
+        assert "source_refs" in sal_check
+        for role_ref in sal_check["source_refs"].values():
+            assert role_ref["confidence"] == "best_match"
 
 
 # ---------------------------------------------------------------------------

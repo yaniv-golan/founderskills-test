@@ -29,6 +29,7 @@ from typing import Any
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_output(data: str, output_path: str | None) -> None:
     if output_path:
         abs_path = os.path.abspath(output_path)
@@ -140,9 +141,62 @@ def _find_numeric_in_model(
     return False
 
 
+def _find_cell_ref(
+    target: float,
+    model_data: dict[str, Any],
+    tolerance: float = 0.05,
+    *,
+    periodicity_aware: bool = False,
+) -> dict[str, str] | None:
+    """Find the cell reference for a value in model_data cell_refs.
+
+    Returns {"ref": "Sheet!B5", "confidence": "best_match"} or None.
+    Uses the list-based cell_refs structure where each entry has
+    {row_index, label, cols: {col_header: "B5"}}.
+    Mirrors the periodicity scaling logic from _find_numeric_in_model.
+    """
+    if target == 0:
+        return None  # Zero is trivially traceable, no meaningful ref
+    mult = _periodicity_multiplier(model_data) if periodicity_aware else 1
+
+    for sheet in model_data.get("sheets", []):
+        cell_refs = sheet.get("cell_refs", [])
+        if not isinstance(cell_refs, list):
+            continue
+        rows = sheet.get("rows", [])
+        headers = sheet.get("headers", [])
+        for ref_entry in cell_refs:
+            row_idx = ref_entry.get("row_index", -1)
+            if row_idx < 0 or row_idx >= len(rows):
+                continue
+            row = rows[row_idx]
+            cols = ref_entry.get("cols", {})
+            for j, val in enumerate(row[1:], 1):
+                if not (isinstance(val, (int, float)) and not isinstance(val, bool)):
+                    continue
+                fval = float(val)
+                col_header = headers[j] if j < len(headers) else ""
+                coord = cols.get(col_header, "")
+                if not coord:
+                    continue
+                # Direct match
+                if _close_enough(target, fval, tolerance):
+                    return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
+                # Periodicity-aware matches
+                if periodicity_aware and mult > 1:
+                    if _close_enough(target * mult, fval, tolerance):
+                        return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
+                    if _close_enough(target, fval / mult, tolerance):
+                        return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
+                    if _close_enough(target, fval * mult, tolerance):
+                        return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+
 
 def _check_company_name(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
     """COMPANY_NAME: fuzzy-match company name against model_data strings."""
@@ -202,10 +256,12 @@ def _check_salary_traceability(inputs: dict[str, Any], model_data: dict[str, Any
         if salary is None or salary == 0:
             continue
         if not _find_numeric_in_model(float(salary), model_data, periodicity_aware=True):
-            untraceable.append({
-                "role": entry.get("role", "unknown"),
-                "salary_annual": salary,
-            })
+            untraceable.append(
+                {
+                    "role": entry.get("role", "unknown"),
+                    "salary_annual": salary,
+                }
+            )
 
     if untraceable:
         return {
@@ -214,11 +270,22 @@ def _check_salary_traceability(inputs: dict[str, Any], model_data: dict[str, Any
             "message": f"{len(untraceable)} salary value(s) not traceable to model data",
             "untraceable": untraceable,
         }
-    return {
+    # Collect cell refs for traceable salaries
+    source_refs: dict[str, Any] = {}
+    for entry in headcount:
+        salary = entry.get("salary_annual")
+        if salary is not None and salary > 0:
+            ref = _find_cell_ref(float(salary), model_data, periodicity_aware=True)
+            if ref:
+                source_refs[entry.get("role", "unknown")] = ref
+    result: dict[str, Any] = {
         "id": "SALARY_TRACEABILITY",
         "status": "pass",
         "message": "All salary values traceable to model data",
     }
+    if source_refs:
+        result["source_refs"] = source_refs
+    return result
 
 
 def _check_revenue_traceability(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
@@ -265,11 +332,20 @@ def _check_revenue_traceability(inputs: dict[str, Any], model_data: dict[str, An
             "message": f"{len(untraceable)} revenue value(s) not traceable to model data",
             "untraceable": untraceable,
         }
-    return {
+    # Collect cell refs for traceable revenue values
+    source_refs: dict[str, Any] = {}
+    for label, val in targets:
+        ref = _find_cell_ref(val, model_data, periodicity_aware=True)
+        if ref:
+            source_refs[label] = ref
+    result: dict[str, Any] = {
         "id": "REVENUE_TRACEABILITY",
         "status": "pass",
         "message": "Revenue values traceable to model data",
     }
+    if source_refs:
+        result["source_refs"] = source_refs
+    return result
 
 
 def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
@@ -284,11 +360,15 @@ def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any]) -> d
 
     # Cash balance is a stock metric — no periodicity scaling
     if _find_numeric_in_model(float(cash_val), model_data, periodicity_aware=False):
-        return {
+        ref = _find_cell_ref(float(cash_val), model_data, periodicity_aware=False)
+        result: dict[str, Any] = {
             "id": "CASH_BALANCE",
             "status": "pass",
             "message": f"Cash balance {cash_val} found in model data",
         }
+        if ref:
+            result["source_refs"] = {"current_balance": ref}
+        return result
     return {
         "id": "CASH_BALANCE",
         "status": "warn",
@@ -298,8 +378,7 @@ def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any]) -> d
 
 def _detect_scale_indicator(model_data: dict[str, Any]) -> str | None:
     """Look for explicit scale indicators like ($000), (in thousands), etc."""
-    patterns = ["($000)", "(in thousands)", "($k)", "(in $k)", "(000s)",
-                "($m)", "(in millions)", "(in $m)"]
+    patterns = ["($000)", "(in thousands)", "($k)", "(in $k)", "(000s)", "($m)", "(in millions)", "(in $m)"]
     for sheet in model_data.get("sheets", []):
         for h in sheet.get("headers", []):
             if isinstance(h, str):
@@ -325,7 +404,7 @@ def _detect_scale_indicator(model_data: dict[str, Any]) -> str | None:
 # Stage-based plausibility ranges for monthly values (USD)
 _STAGE_RANGES: dict[str, dict[str, tuple[float, float]]] = {
     "pre-seed": {"cash_balance": (10_000, 50_000_000), "monthly_burn": (1_000, 500_000)},
-    "seed":     {"cash_balance": (50_000, 100_000_000), "monthly_burn": (5_000, 2_000_000)},
+    "seed": {"cash_balance": (50_000, 100_000_000), "monthly_burn": (5_000, 2_000_000)},
     "series-a": {"cash_balance": (500_000, 500_000_000), "monthly_burn": (50_000, 10_000_000)},
     "series-b": {"cash_balance": (1_000_000, 1_000_000_000), "monthly_burn": (100_000, 50_000_000)},
 }
@@ -390,6 +469,7 @@ def _check_scale_plausibility(inputs: dict[str, Any], model_data: dict[str, Any]
 # Main
 # ---------------------------------------------------------------------------
 
+
 def _should_skip(model_data: dict[str, Any] | None, inputs: dict[str, Any]) -> str | None:
     """Return a skip reason string, or None if checks should run."""
     if model_data is None:
@@ -434,9 +514,7 @@ def validate(inputs: dict[str, Any], model_data: dict[str, Any] | None) -> dict[
     for w in warnings:
         cid = w["id"]
         if cid == "COMPANY_NAME" and w.get("candidates"):
-            correction_hints.append(
-                f"Company name mismatch — candidates from model: {', '.join(w['candidates'][:3])}"
-            )
+            correction_hints.append(f"Company name mismatch — candidates from model: {', '.join(w['candidates'][:3])}")
         elif cid == "SALARY_TRACEABILITY":
             roles = [u["role"] for u in w.get("untraceable", [])]
             correction_hints.append(
@@ -448,9 +526,7 @@ def validate(inputs: dict[str, Any], model_data: dict[str, Any] | None) -> dict[
                 f"Revenue values [{', '.join(fields)}] not found in spreadsheet — verify against source"
             )
         elif cid == "CASH_BALANCE":
-            correction_hints.append(
-                f"Cash balance {w.get('message', '')} — verify against source"
-            )
+            correction_hints.append(f"Cash balance {w.get('message', '')} — verify against source")
         elif cid == "SCALE_PLAUSIBILITY":
             sigs = w.get("signals", [])
             correction_hints.append(

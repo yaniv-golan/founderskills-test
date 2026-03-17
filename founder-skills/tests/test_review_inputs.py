@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -130,6 +131,11 @@ _MINIMAL_INPUTS = {
 }
 
 
+def _compute_hash(data: dict[str, Any]) -> str:
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _generate_static(inputs: dict[str, Any]) -> tuple[int, str, str]:
     """Write inputs to temp file, run script with --static, return (exit_code, html, stderr)."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -245,6 +251,9 @@ class TestStaticHTML:
         rc, html, stderr = _generate_static(_FULL_INPUTS)
         assert "warning_overrides" in html or "warningOverrides" in html
         assert "ils_fields" in html or "ilsFields" in html
+        assert "BASE_HASH" in html
+        assert "base_hash" in html
+        assert "changes" in html
 
     def test_light_theme_colors(self) -> None:
         """Uses light theme palette."""
@@ -321,9 +330,7 @@ _EXTRACTION_WARNINGS_PASS: dict[str, Any] = {
 }
 
 
-def _generate_static_with_ew(
-    inputs: dict[str, Any], ew: dict[str, Any] | None
-) -> tuple[int, str, str]:
+def _generate_static_with_ew(inputs: dict[str, Any], ew: dict[str, Any] | None) -> tuple[int, str, str]:
     """Write inputs + extraction warnings, run script with --static, return (rc, html, stderr)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         inputs_path = os.path.join(tmpdir, "inputs.json")
@@ -465,8 +472,8 @@ class TestServerMode:
         try:
             payload = json.dumps(
                 {
-                    "corrections": [{"path": "revenue.mrr.value", "was": 50000, "now": 75000}],
-                    "corrected": _FULL_INPUTS,
+                    "base_hash": _compute_hash(_FULL_INPUTS),
+                    "changes": [{"path": "revenue.mrr.value", "expected_old": 50000, "new": 75000}],
                     "warning_overrides": [],
                     "ils_fields": {},
                 }
@@ -485,7 +492,7 @@ class TestServerMode:
             assert os.path.exists(fb_path)
             with open(fb_path) as f:
                 saved = json.load(f)
-            assert saved["corrections"][0]["path"] == "revenue.mrr.value"
+            assert saved["changes"][0]["path"] == "revenue.mrr.value"
         finally:
             proc.terminate()
             proc.wait(timeout=5)
@@ -607,15 +614,13 @@ class TestIntegration:
         """Start server, POST feedback, kill server, apply corrections."""
         port, tmpdir, proc = _start_server(_FULL_INPUTS)
         try:
-            # Simulate founder submission via server
-            corrected_state = json.loads(json.dumps(_FULL_INPUTS))
-            corrected_state["cash"]["current_balance"] = 800000
+            # Simulate founder submission via server (new v2 payload shape)
             payload = json.dumps(
                 {
-                    "corrections": [
-                        {"path": "cash.current_balance", "was": 1000000, "now": 800000, "label": "Cash"},
+                    "base_hash": _compute_hash(_FULL_INPUTS),
+                    "changes": [
+                        {"path": "cash.current_balance", "expected_old": 1000000, "new": 800000},
                     ],
-                    "corrected": corrected_state,
                     "warning_overrides": [],
                     "ils_fields": {},
                 }
