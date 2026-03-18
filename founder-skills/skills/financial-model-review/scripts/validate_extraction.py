@@ -472,8 +472,29 @@ def _check_scale_plausibility(inputs: dict[str, Any], model_data: dict[str, Any]
         if cash < low:
             signals.append(f"Cash balance ${cash:,.0f} implausibly low for {stage} stage (min ~${low:,.0f})")
 
-    # Burn sanity — if we have headcount, burn should cover at least basic salaries
-    if burn is not None and burn > 0 and total_headcount > 0:
+    # Expense sanity — use gross expenses (headcount salary + opex), not net burn.
+    # Net burn can be tiny when revenue nearly covers expenses, causing false positives.
+    gross_monthly = 0.0
+    for h in headcount_entries:
+        sal = h.get("salary_annual", 0)
+        if isinstance(sal, (int, float)) and sal > 0:
+            burden = h.get("burden_pct", 0) or 0
+            count = h.get("count", 1) or 1
+            gross_monthly += (sal * (1 + burden) / 12) * count
+    for o in inputs.get("expenses", {}).get("opex_monthly", []):
+        amt = o.get("amount", 0)
+        if isinstance(amt, (int, float)) and amt > 0:
+            gross_monthly += amt
+
+    if gross_monthly > 0 and total_headcount > 0:
+        per_person = gross_monthly / total_headcount
+        if per_person < 2_000:
+            signals.append(
+                f"Gross monthly expenses ${gross_monthly:,.0f} too low for {total_headcount} employees "
+                f"(implies ${per_person:,.0f}/person/month)"
+            )
+    elif burn is not None and burn > 0 and total_headcount > 0:
+        # Fallback to net burn only when no expense breakdown available
         min_burn = total_headcount * 2_000
         if burn < min_burn:
             signals.append(
