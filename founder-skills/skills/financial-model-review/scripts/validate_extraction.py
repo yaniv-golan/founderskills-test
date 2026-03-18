@@ -19,6 +19,7 @@ Output: {"status": "pass"|"warn", "checks": [...], "summary": {...}, "correction
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -119,8 +120,14 @@ def _find_numeric_in_model(
     tolerance: float = 0.05,
     *,
     periodicity_aware: bool = False,
+    scale_factor: int = 1,
 ) -> bool:
-    """Check if *target* (or a periodicity-scaled variant) appears in model_data."""
+    """Check if *target* (or a scaled variant) appears in model_data.
+
+    *scale_factor*: denomination multiplier (e.g., 1000 if model is in $000).
+    When > 1, also checks target/scale_factor against model values, and
+    combinations of scale_factor with periodicity_multiplier.
+    """
     if target == 0:
         return True  # Zero is trivially traceable
     nums = _all_numeric_values(model_data)
@@ -135,9 +142,21 @@ def _find_numeric_in_model(
                 return True
             if _close_enough(target, n / mult, tolerance):
                 return True
-            # Also try: target ≈ n * mult (source is monthly, inputs annualized)
             if _close_enough(target, n * mult, tolerance):
                 return True
+        # Scale-aware: target was multiplied by scale_factor, model has original
+        if scale_factor > 1:
+            descaled = target / scale_factor
+            if _close_enough(descaled, n, tolerance):
+                return True
+            # Combination: scale + periodicity
+            if periodicity_aware and mult > 1:
+                if _close_enough(descaled * mult, n, tolerance):
+                    return True
+                if _close_enough(descaled, n / mult, tolerance):
+                    return True
+                if _close_enough(descaled, n * mult, tolerance):
+                    return True
     return False
 
 
@@ -147,17 +166,30 @@ def _find_cell_ref(
     tolerance: float = 0.05,
     *,
     periodicity_aware: bool = False,
+    scale_factor: int = 1,
 ) -> dict[str, str] | None:
     """Find the cell reference for a value in model_data cell_refs.
 
     Returns {"ref": "Sheet!B5", "confidence": "best_match"} or None.
     Uses the list-based cell_refs structure where each entry has
     {row_index, label, cols: {col_header: "B5"}}.
-    Mirrors the periodicity scaling logic from _find_numeric_in_model.
+    Mirrors the scaling logic from _find_numeric_in_model.
     """
     if target == 0:
         return None  # Zero is trivially traceable, no meaningful ref
     mult = _periodicity_multiplier(model_data) if periodicity_aware else 1
+
+    def _matches(t: float, fval: float) -> bool:
+        if _close_enough(t, fval, tolerance):
+            return True
+        if periodicity_aware and mult > 1:
+            if _close_enough(t * mult, fval, tolerance):
+                return True
+            if _close_enough(t, fval / mult, tolerance):
+                return True
+            if _close_enough(t, fval * mult, tolerance):
+                return True
+        return False
 
     for sheet in model_data.get("sheets", []):
         cell_refs = sheet.get("cell_refs", [])
@@ -179,17 +211,12 @@ def _find_cell_ref(
                 coord = cols.get(col_header, "")
                 if not coord:
                     continue
-                # Direct match
-                if _close_enough(target, fval, tolerance):
-                    return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
-                # Periodicity-aware matches
-                if periodicity_aware and mult > 1:
-                    if _close_enough(target * mult, fval, tolerance):
-                        return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
-                    if _close_enough(target, fval / mult, tolerance):
-                        return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
-                    if _close_enough(target, fval * mult, tolerance):
-                        return {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
+                ref_result = {"ref": f"{sheet['name']}!{coord}", "confidence": "best_match"}
+                if _matches(target, fval):
+                    return ref_result
+                # Scale-aware
+                if scale_factor > 1 and _matches(target / scale_factor, fval):
+                    return ref_result
     return None
 
 
@@ -240,7 +267,9 @@ def _check_company_name(inputs: dict[str, Any], model_data: dict[str, Any]) -> d
     }
 
 
-def _check_salary_traceability(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
+def _check_salary_traceability(
+    inputs: dict[str, Any], model_data: dict[str, Any], *, scale_factor: int = 1
+) -> dict[str, Any]:
     """SALARY_TRACEABILITY: check that headcount salary values appear in model_data."""
     headcount = inputs.get("expenses", {}).get("headcount", [])
     if not headcount:
@@ -255,7 +284,7 @@ def _check_salary_traceability(inputs: dict[str, Any], model_data: dict[str, Any
         salary = entry.get("salary_annual")
         if salary is None or salary == 0:
             continue
-        if not _find_numeric_in_model(float(salary), model_data, periodicity_aware=True):
+        if not _find_numeric_in_model(float(salary), model_data, periodicity_aware=True, scale_factor=scale_factor):
             untraceable.append(
                 {
                     "role": entry.get("role", "unknown"),
@@ -275,7 +304,7 @@ def _check_salary_traceability(inputs: dict[str, Any], model_data: dict[str, Any
     for entry in headcount:
         salary = entry.get("salary_annual")
         if salary is not None and salary > 0:
-            ref = _find_cell_ref(float(salary), model_data, periodicity_aware=True)
+            ref = _find_cell_ref(float(salary), model_data, periodicity_aware=True, scale_factor=scale_factor)
             if ref:
                 source_refs[entry.get("role", "unknown")] = ref
     result: dict[str, Any] = {
@@ -288,7 +317,9 @@ def _check_salary_traceability(inputs: dict[str, Any], model_data: dict[str, Any
     return result
 
 
-def _check_revenue_traceability(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
+def _check_revenue_traceability(
+    inputs: dict[str, Any], model_data: dict[str, Any], *, scale_factor: int = 1
+) -> dict[str, Any]:
     """REVENUE_TRACEABILITY: check MRR/ARR/monthly totals against model_data."""
     revenue = inputs.get("revenue", {})
     mrr_val = revenue.get("mrr", {}).get("value") if isinstance(revenue.get("mrr"), dict) else None
@@ -322,7 +353,7 @@ def _check_revenue_traceability(inputs: dict[str, Any], model_data: dict[str, An
 
     untraceable: list[dict[str, Any]] = []
     for label, val in targets:
-        if not _find_numeric_in_model(val, model_data, periodicity_aware=True):
+        if not _find_numeric_in_model(val, model_data, periodicity_aware=True, scale_factor=scale_factor):
             untraceable.append({"field": label, "value": val})
 
     if untraceable:
@@ -335,7 +366,7 @@ def _check_revenue_traceability(inputs: dict[str, Any], model_data: dict[str, An
     # Collect cell refs for traceable revenue values
     source_refs: dict[str, Any] = {}
     for label, val in targets:
-        ref = _find_cell_ref(val, model_data, periodicity_aware=True)
+        ref = _find_cell_ref(val, model_data, periodicity_aware=True, scale_factor=scale_factor)
         if ref:
             source_refs[label] = ref
     result: dict[str, Any] = {
@@ -348,7 +379,7 @@ def _check_revenue_traceability(inputs: dict[str, Any], model_data: dict[str, An
     return result
 
 
-def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any]) -> dict[str, Any]:
+def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any], *, scale_factor: int = 1) -> dict[str, Any]:
     """CASH_BALANCE: check that cash balance (stock metric) appears in model_data."""
     cash_val = inputs.get("cash", {}).get("current_balance")
     if cash_val is None or cash_val == 0:
@@ -359,8 +390,8 @@ def _check_cash_balance(inputs: dict[str, Any], model_data: dict[str, Any]) -> d
         }
 
     # Cash balance is a stock metric — no periodicity scaling
-    if _find_numeric_in_model(float(cash_val), model_data, periodicity_aware=False):
-        ref = _find_cell_ref(float(cash_val), model_data, periodicity_aware=False)
+    if _find_numeric_in_model(float(cash_val), model_data, periodicity_aware=False, scale_factor=scale_factor):
+        ref = _find_cell_ref(float(cash_val), model_data, periodicity_aware=False, scale_factor=scale_factor)
         result: dict[str, Any] = {
             "id": "CASH_BALANCE",
             "status": "pass",
@@ -418,6 +449,15 @@ def _check_scale_plausibility(inputs: dict[str, Any], model_data: dict[str, Any]
     headcount_entries = inputs.get("expenses", {}).get("headcount", [])
     total_headcount = sum(h.get("count", 0) for h in headcount_entries if isinstance(h, dict))
 
+    # If scale correction was already applied, verify values are now plausible
+    scale_correction = inputs.get("metadata", {}).get("scale_correction")
+    if scale_correction and _values_already_plausible(inputs):
+        return {
+            "id": "SCALE_PLAUSIBILITY",
+            "status": "pass",
+            "message": f"Scale correction applied (x{scale_correction.get('factor', '?')}), values plausible",
+        }
+
     signals: list[str] = []
 
     # Check for explicit scale indicator in model
@@ -434,7 +474,6 @@ def _check_scale_plausibility(inputs: dict[str, Any], model_data: dict[str, Any]
 
     # Burn sanity — if we have headcount, burn should cover at least basic salaries
     if burn is not None and burn > 0 and total_headcount > 0:
-        # Minimum plausible monthly burn: $2K/person (even for low-cost geographies)
         min_burn = total_headcount * 2_000
         if burn < min_burn:
             signals.append(
@@ -466,6 +505,191 @@ def _check_scale_plausibility(inputs: dict[str, Any], model_data: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Scale fix
+# ---------------------------------------------------------------------------
+
+# Scalar monetary paths to multiply when fixing scale
+_MONETARY_SCALAR_PATHS = [
+    "cash.current_balance",
+    "cash.monthly_net_burn",
+    "cash.debt",
+    "revenue.mrr.value",
+    "revenue.arr.value",
+    "revenue.monthly_total",
+    "cash.fundraising.target_raise",
+    "cash.grants.iia_approved",
+    "cash.grants.iia_pending",
+    "unit_economics.cac.total",
+    "unit_economics.ltv.value",
+    "unit_economics.ltv.inputs.arpu_monthly",
+]
+
+# Array fields: (array_path, field_key) pairs
+_MONETARY_ARRAY_FIELDS = [
+    ("expenses.headcount", "salary_annual"),
+    ("expenses.opex_monthly", "amount"),
+    ("revenue.monthly", "total"),
+    ("revenue.monthly", "arr"),
+    ("revenue.quarterly", "total"),
+    ("revenue.quarterly", "arr"),
+]
+
+# Array fields nested inside drivers
+_MONETARY_DRIVER_FIELDS = [
+    ("revenue.monthly", "drivers", "arpu_monthly"),
+    ("revenue.quarterly", "drivers", "arpu_monthly"),
+]
+
+
+def _deep_get(data: dict[str, Any], dotted_path: str) -> Any:
+    """Navigate nested dict by dotted path."""
+    obj: Any = data
+    for part in dotted_path.split("."):
+        if isinstance(obj, dict):
+            obj = obj.get(part)
+        else:
+            return None
+    return obj
+
+
+def _set_by_path_simple(data: dict[str, Any], dotted_path: str, value: Any) -> None:
+    """Set a value in a nested dict by dotted path."""
+    parts = dotted_path.split(".")
+    obj: Any = data
+    for part in parts[:-1]:
+        if not isinstance(obj, dict):
+            return
+        obj = obj.get(part)
+        if obj is None:
+            return
+    if isinstance(obj, dict):
+        obj[parts[-1]] = value
+
+
+def _indicator_to_factor(indicator: str) -> int:
+    """Convert a scale indicator string to a numeric factor."""
+    low = indicator.lower()
+    if any(k in low for k in ["million", "$m"]):
+        return 1_000_000
+    # Default: thousands
+    return 1_000
+
+
+def _values_already_plausible(inputs: dict[str, Any]) -> bool:
+    """Check if monetary values are already in plausible ranges (already scaled).
+
+    Checks multiple monetary fields — not just cash/burn — to avoid false
+    negatives when only some fields are populated.
+    """
+    stage = inputs.get("company", {}).get("stage", "seed")
+    ranges = _STAGE_RANGES.get(stage, _STAGE_RANGES["seed"])
+
+    plausible_count = 0
+    checked_count = 0
+
+    # Cash balance
+    cash = inputs.get("cash", {}).get("current_balance")
+    if cash is not None and cash > 0:
+        checked_count += 1
+        low, high = ranges["cash_balance"]
+        if low <= cash <= high:
+            plausible_count += 1
+
+    # Burn
+    burn = inputs.get("cash", {}).get("monthly_net_burn")
+    if burn is not None and burn > 0:
+        checked_count += 1
+        low, high = ranges["monthly_burn"]
+        if low <= burn <= high:
+            plausible_count += 1
+
+    # MRR — should be > $1K for any stage with revenue
+    mrr = inputs.get("revenue", {}).get("mrr", {})
+    if isinstance(mrr, dict):
+        mrr_val = mrr.get("value")
+        if mrr_val is not None and mrr_val > 0:
+            checked_count += 1
+            if mrr_val >= 1_000:
+                plausible_count += 1
+
+    # Salary — should be > $10K annual
+    for h in inputs.get("expenses", {}).get("headcount", []):
+        salary = h.get("salary_annual", 0)
+        if salary and salary > 0:
+            checked_count += 1
+            if salary >= 10_000:
+                plausible_count += 1
+            break  # one salary check is enough
+
+    if checked_count == 0:
+        return True  # no monetary fields to check — assume OK, don't fix blindly
+
+    # If majority of checked fields are plausible, values are already scaled
+    return plausible_count > checked_count / 2
+
+
+def _apply_scale_fix(inputs: dict[str, Any], factor: int) -> int:
+    """Multiply all monetary fields by *factor*. Returns count of fields corrected."""
+    corrected = 0
+
+    # Scalar paths
+    for path in _MONETARY_SCALAR_PATHS:
+        val = _deep_get(inputs, path)
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val != 0:
+            _set_by_path_simple(inputs, path, val * factor)
+            corrected += 1
+
+    # CAC components (dynamic keys)
+    cac_components = _deep_get(inputs, "unit_economics.cac.components")
+    if isinstance(cac_components, dict):
+        for k, v in cac_components.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0:
+                cac_components[k] = v * factor
+                corrected += 1
+
+    # COGS (dynamic keys)
+    cogs = _deep_get(inputs, "expenses.cogs")
+    if isinstance(cogs, dict):
+        for k, v in cogs.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0:
+                cogs[k] = v * factor
+                corrected += 1
+
+    # Array fields
+    for arr_path, field_key in _MONETARY_ARRAY_FIELDS:
+        arr = _deep_get(inputs, arr_path)
+        if isinstance(arr, list):
+            for entry in arr:
+                if isinstance(entry, dict):
+                    val = entry.get(field_key)
+                    if isinstance(val, (int, float)) and not isinstance(val, bool) and val != 0:
+                        entry[field_key] = val * factor
+                        corrected += 1
+
+    # Nested driver fields
+    for arr_path, driver_key, field_key in _MONETARY_DRIVER_FIELDS:
+        arr = _deep_get(inputs, arr_path)
+        if isinstance(arr, list):
+            for entry in arr:
+                if isinstance(entry, dict):
+                    drivers = entry.get(driver_key)
+                    if isinstance(drivers, dict):
+                        val = drivers.get(field_key)
+                        if isinstance(val, (int, float)) and not isinstance(val, bool) and val != 0:
+                            drivers[field_key] = val * factor
+                            corrected += 1
+
+    # Record the correction in metadata
+    metadata = inputs.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        inputs["metadata"] = metadata
+    metadata["scale_correction"] = {"factor": factor, "fields_corrected": corrected}
+
+    return corrected
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -487,8 +711,18 @@ def _should_skip(model_data: dict[str, Any] | None, inputs: dict[str, Any]) -> s
     return None
 
 
-def validate(inputs: dict[str, Any], model_data: dict[str, Any] | None) -> dict[str, Any]:
-    """Run all extraction validation checks."""
+def validate(
+    inputs: dict[str, Any],
+    model_data: dict[str, Any] | None,
+    *,
+    scale_factor: int = 1,
+) -> dict[str, Any]:
+    """Run all extraction validation checks.
+
+    *scale_factor*: if > 1, inputs were scaled by this factor from model
+    denomination. Traceability checks use this to match against unscaled
+    model values.
+    """
     skip_reason = _should_skip(model_data, inputs)
     if skip_reason:
         return {
@@ -501,9 +735,9 @@ def validate(inputs: dict[str, Any], model_data: dict[str, Any] | None) -> dict[
     assert model_data is not None
     checks = [
         _check_company_name(inputs, model_data),
-        _check_salary_traceability(inputs, model_data),
-        _check_revenue_traceability(inputs, model_data),
-        _check_cash_balance(inputs, model_data),
+        _check_salary_traceability(inputs, model_data, scale_factor=scale_factor),
+        _check_revenue_traceability(inputs, model_data, scale_factor=scale_factor),
+        _check_cash_balance(inputs, model_data, scale_factor=scale_factor),
         _check_scale_plausibility(inputs, model_data),
     ]
 
@@ -551,6 +785,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Validate extraction: cross-reference model_data vs inputs")
     parser.add_argument("--inputs", required=True, help="Path to inputs.json")
     parser.add_argument("--model-data", required=True, help="Path to model_data.json")
+    parser.add_argument("--fix", action="store_true", help="Auto-fix scale denomination issues (rewrites inputs.json)")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     parser.add_argument("-o", "--output", help="Write output to file instead of stdout")
     args = parser.parse_args()
@@ -571,7 +806,34 @@ def main() -> None:
     except (OSError, json.JSONDecodeError):
         pass  # Will be handled as skip
 
-    result = validate(inputs, model_data)
+    scale_factor = 1
+
+    # --fix: detect and apply scale correction before validation
+    if args.fix and model_data is not None:
+        indicator = _detect_scale_indicator(model_data)
+        already_corrected = bool(inputs.get("metadata", {}).get("scale_correction"))
+        if indicator and not already_corrected and not _values_already_plausible(inputs):
+            factor = _indicator_to_factor(indicator)
+            inputs_to_fix = copy.deepcopy(inputs)
+            corrected_count = _apply_scale_fix(inputs_to_fix, factor)
+            if corrected_count > 0:
+                # Write corrected inputs back to the same path
+                with open(args.inputs, "w", encoding="utf-8") as f:
+                    json.dump(inputs_to_fix, f, indent=2)
+                print(
+                    f"Fixed: scaled {corrected_count} monetary fields by {factor}x (indicator: {indicator})",
+                    file=sys.stderr,
+                )
+                inputs = inputs_to_fix
+                scale_factor = factor
+
+    result = validate(inputs, model_data, scale_factor=scale_factor)
+
+    # Add fix info to result if fix was applied
+    if scale_factor > 1:
+        result["fixed"] = True
+        result["scale_correction"] = inputs.get("metadata", {}).get("scale_correction", {})
+
     indent = 2 if args.pretty else None
     out = json.dumps(result, indent=indent) + "\n"
     _write_output(out, args.output)

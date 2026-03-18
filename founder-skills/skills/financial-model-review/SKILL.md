@@ -203,10 +203,12 @@ After the sub-agent returns, **proceed to Step 2.5: Validate Extraction** before
 Run the extraction validation script to cross-reference `model_data.json` against `inputs.json`:
 
 ```bash
-python3 "$SCRIPTS/validate_extraction.py" --inputs "$REVIEW_DIR/inputs.json" --model-data "$REVIEW_DIR/model_data.json" --pretty -o "$REVIEW_DIR/extraction_validation.json"
+python3 "$SCRIPTS/validate_extraction.py" --inputs "$REVIEW_DIR/inputs.json" --model-data "$REVIEW_DIR/model_data.json" --fix --pretty -o "$REVIEW_DIR/extraction_validation.json"
 ```
 
-**If `status` is `"warn"`:** Check `correction_hints` for specific issues. Resume the extraction sub-agent (using the saved agent ID from Step 2) with the correction hints and ask it to fix the flagged values. Then re-run the validation. **Maximum 2 retries** — if warnings persist after 2 attempts, proceed to Step 3 with the warnings intact; they will appear as a banner in the review page for the founder to see.
+The `--fix` flag automatically corrects scale denomination issues (e.g., model in $000 → multiplies all monetary fields by 1000). It only applies when a scale indicator is found in `model_data` AND values appear implausibly low. It will not double-scale already-correct values. When a fix is applied, the output includes `"fixed": true` and `metadata.scale_correction` is written to `inputs.json`.
+
+**If `status` is `"warn"` (after --fix):** Check `correction_hints` for specific issues. Scale issues are auto-fixed; remaining warnings (company name mismatch, untraceable values) may need manual correction. Resume the extraction sub-agent (using the saved agent ID from Step 2) with the correction hints and ask it to fix the flagged values. Then re-run the validation **without --fix** (scale is already handled). **Maximum 2 retries** — if warnings persist after 2 attempts, proceed to Step 3 with the warnings intact; they will appear as a banner in the review page for the founder to see.
 
 **If `status` is `"pass"` or `"skip"`:** Proceed to Step 3.
 

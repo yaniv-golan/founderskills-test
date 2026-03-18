@@ -412,10 +412,206 @@ class TestBackwardCompat:
         """Missing pre_header_rows key treated as empty array."""
         model = json.loads(json.dumps(_MODEL_DATA))
         del model["sheets"][0]["pre_header_rows"]
-        # Company name won't be found in pre_header (it's gone) but it is
-        # in the row data as "Acme Corp" doesn't appear there either,
-        # so check won't crash
         rc, data, _ = _run(_INPUTS, model)
         assert rc == 0
-        # Should not crash — that's the key assertion
         assert data["status"] in ("pass", "warn")
+
+
+# ---------------------------------------------------------------------------
+# --fix scale correction tests
+# ---------------------------------------------------------------------------
+
+
+def _run_fix(
+    inputs: dict[str, Any],
+    model_data: dict[str, Any],
+    extra_args: list[str] | None = None,
+) -> tuple[int, dict[str, Any], dict[str, Any], str]:
+    """Run with --fix, return (exit_code, result_json, modified_inputs, stderr)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        inputs_path = os.path.join(tmpdir, "inputs.json")
+        model_data_path = os.path.join(tmpdir, "model_data.json")
+        with open(inputs_path, "w") as f:
+            json.dump(inputs, f)
+        with open(model_data_path, "w") as f:
+            json.dump(model_data, f)
+
+        cmd = [
+            sys.executable,
+            os.path.join(FMR_SCRIPTS_DIR, "validate_extraction.py"),
+            "--inputs",
+            inputs_path,
+            "--model-data",
+            model_data_path,
+            "--fix",
+            "--pretty",
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            data = json.loads(result.stdout) if result.stdout.strip() else {}
+        except json.JSONDecodeError:
+            data = {}
+
+        # Re-read the (possibly modified) inputs
+        with open(inputs_path) as f:
+            modified_inputs = json.load(f)
+
+        return result.returncode, data, modified_inputs, result.stderr
+
+
+# Model in thousands — ($000) indicator, unscaled values
+_MODEL_THOUSANDS: dict[str, Any] = {
+    "sheets": [
+        {
+            "name": "Summary",
+            "headers": ["Line Item ($000)", "Jan 2025", "Feb 2025"],
+            "rows": [
+                ["Revenue", 50, 55],
+                ["Payroll", 120, 120],
+                ["Cash Balance", 4000, 3900],
+            ],
+            "detected_type": "summary",
+            "periodicity": "monthly",
+            "row_count": 3,
+            "col_count": 3,
+            "pre_header_rows": [["Acme Corp", None, None]],
+            "cell_refs": [],
+        }
+    ],
+    "source_format": "xlsx",
+    "source_file": "model.xlsx",
+    "periodicity_summary": "monthly",
+}
+
+# Inputs with unscaled values (model is in $000 but values not multiplied)
+_INPUTS_UNSCALED: dict[str, Any] = {
+    "company": {
+        "company_name": "Acme Corp",
+        "slug": "acme-corp",
+        "stage": "seed",
+        "sector": "B2B SaaS",
+        "geography": "US",
+        "model_format": "spreadsheet",
+    },
+    "revenue": {
+        "mrr": {"value": 55, "as_of": "2025-02"},
+        "customers": 100,
+    },
+    "cash": {
+        "current_balance": 3900,
+        "monthly_net_burn": 65,
+    },
+    "expenses": {
+        "headcount": [
+            {"role": "R&D", "count": 5, "salary_annual": 120, "burden_pct": 0.25},
+        ],
+        "opex_monthly": [
+            {"category": "Cloud", "amount": 10},
+        ],
+        "cogs": {"hosting": 5},
+    },
+    "unit_economics": {
+        "cac": {"total": 8, "components": {"ad_spend": 3, "sales_salary": 5}},
+        "ltv": {"value": 20, "inputs": {"arpu_monthly": 0.55, "churn_monthly": 0.03, "gross_margin": 0.8}},
+        "gross_margin": 0.8,
+    },
+}
+
+
+class TestScaleFix:
+    def test_fix_applies_multiplier(self) -> None:
+        """--fix scales monetary values by 1000x when ($000) indicator found."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        assert modified["cash"]["current_balance"] == 3_900_000
+        assert modified["cash"]["monthly_net_burn"] == 65_000
+        assert modified["revenue"]["mrr"]["value"] == 55_000
+        assert data.get("fixed") is True
+
+    def test_fix_scales_array_fields(self) -> None:
+        """--fix scales headcount salary and opex amount, not count/burden_pct."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        hc = modified["expenses"]["headcount"][0]
+        assert hc["salary_annual"] == 120_000
+        assert hc["count"] == 5  # not scaled
+        assert hc["burden_pct"] == 0.25  # not scaled
+        assert modified["expenses"]["opex_monthly"][0]["amount"] == 10_000
+        assert modified["expenses"]["cogs"]["hosting"] == 5_000
+
+    def test_fix_scales_cac_components(self) -> None:
+        """--fix scales CAC total and components."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        assert modified["unit_economics"]["cac"]["total"] == 8_000
+        assert modified["unit_economics"]["cac"]["components"]["ad_spend"] == 3_000
+        assert modified["unit_economics"]["cac"]["components"]["sales_salary"] == 5_000
+
+    def test_fix_skips_non_monetary(self) -> None:
+        """--fix does not scale rates, counts, or percentages."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        assert modified["revenue"]["customers"] == 100  # count, not scaled
+        assert modified["unit_economics"]["gross_margin"] == 0.8  # rate
+        assert modified["unit_economics"]["ltv"]["inputs"]["churn_monthly"] == 0.03
+        assert modified["unit_economics"]["ltv"]["inputs"]["gross_margin"] == 0.8
+
+    def test_fix_records_metadata(self) -> None:
+        """--fix writes scale_correction to metadata."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        sc = modified["metadata"]["scale_correction"]
+        assert sc["factor"] == 1000
+        assert sc["fields_corrected"] > 0
+        assert data["scale_correction"]["factor"] == 1000
+
+    def test_fix_noop_when_already_plausible(self) -> None:
+        """--fix does not double-scale when values are already plausible."""
+        # Scale inputs to full dollars first
+        already_scaled = json.loads(json.dumps(_INPUTS_UNSCALED))
+        already_scaled["cash"]["current_balance"] = 3_900_000
+        already_scaled["cash"]["monthly_net_burn"] = 65_000
+        already_scaled["revenue"]["mrr"]["value"] = 55_000
+        already_scaled["expenses"]["headcount"][0]["salary_annual"] = 120_000
+
+        rc, data, modified, stderr = _run_fix(already_scaled, _MODEL_THOUSANDS)
+        assert rc == 0
+        # Values should NOT have been multiplied again
+        assert modified["cash"]["current_balance"] == 3_900_000
+        assert modified["expenses"]["headcount"][0]["salary_annual"] == 120_000
+        assert data.get("fixed") is not True
+
+    def test_fix_noop_when_no_indicator(self) -> None:
+        """--fix does nothing when model has no scale indicator."""
+        rc, data, modified, stderr = _run_fix(_INPUTS, _MODEL_DATA)
+        assert rc == 0
+        # Values unchanged
+        assert modified["cash"]["current_balance"] == _INPUTS["cash"]["current_balance"]
+        assert data.get("fixed") is not True
+
+    def test_fix_revalidation_passes(self) -> None:
+        """After --fix, re-running validation passes SCALE_PLAUSIBILITY."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        checks_by_id = {c["id"]: c for c in data["checks"]}
+        assert checks_by_id["SCALE_PLAUSIBILITY"]["status"] == "pass"
+
+    def test_fix_traceability_passes_after_scale(self) -> None:
+        """After --fix, traceability checks pass (scale-aware lookup)."""
+        rc, data, modified, stderr = _run_fix(_INPUTS_UNSCALED, _MODEL_THOUSANDS)
+        assert rc == 0
+        checks_by_id = {c["id"]: c for c in data["checks"]}
+        # Cash was 3900 in model, now 3900000 in inputs — should still trace
+        assert checks_by_id["CASH_BALANCE"]["status"] == "pass"
+
+    def test_fix_noop_when_already_corrected(self) -> None:
+        """--fix skips if metadata.scale_correction already present."""
+        already_corrected = json.loads(json.dumps(_INPUTS_UNSCALED))
+        already_corrected["metadata"] = {"scale_correction": {"factor": 1000, "fields_corrected": 10}}
+        rc, data, modified, stderr = _run_fix(already_corrected, _MODEL_THOUSANDS)
+        assert rc == 0
+        # Values should NOT have been changed
+        assert modified["cash"]["current_balance"] == 3900
+        assert data.get("fixed") is not True
