@@ -463,6 +463,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, _ORIGINAL)
         assert rc == 0
+        assert corrected is not None
         assert corrected["revenue"]["mrr"]["value"] == 75000
 
     def test_patch_stale_base_hash_rejected(self) -> None:
@@ -501,6 +502,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, _ORIGINAL)
         assert rc == 0
+        assert corrected is not None
         assert corrected["cash"]["current_balance"] == 1500000
 
     def test_patch_multiple_changes(self) -> None:
@@ -516,6 +518,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, _ORIGINAL)
         assert rc == 0
+        assert corrected is not None
         assert corrected["revenue"]["mrr"]["value"] == 75000
         assert corrected["revenue"]["customers"] == 150
 
@@ -543,6 +546,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, _ORIGINAL)
         assert rc == 0
+        assert corrected is not None
         assert corrected["revenue"]["mrr"]["value"] == 75000
 
     def test_patch_audit_trail(self) -> None:
@@ -555,6 +559,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, _ORIGINAL)
         assert rc == 0
+        assert audit is not None
         assert audit["correction_count"] == 1
         assert audit["corrections"][0]["path"] == "revenue.mrr.value"
 
@@ -568,6 +573,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, _ORIGINAL)
         assert rc == 0
+        assert corrected is not None
         # Unmodified fields preserved exactly
         assert corrected["cash"]["current_balance"] == 1000000
         assert corrected["company"]["company_name"] == "TestCo"
@@ -599,6 +605,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, original_with_hc)
         assert rc == 0
+        assert corrected is not None
         assert len(corrected["expenses"]["headcount"]) == 2
         assert corrected["expenses"]["headcount"][1]["role"] == "Designer"
 
@@ -629,6 +636,7 @@ class TestPatchBasedFlow:
         }
         rc, stdout, corrected, audit = _run(payload, original_with_hc)
         assert rc == 0
+        assert corrected is not None
         assert len(corrected["expenses"]["headcount"]) == 1
 
     def test_replace_array_stale_length_rejected(self) -> None:
