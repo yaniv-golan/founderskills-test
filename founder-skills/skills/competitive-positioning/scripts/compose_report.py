@@ -121,6 +121,51 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _humanize(value: str) -> str:
+    """Convert machine IDs to human-readable labels for report output."""
+    _LABELS: dict[str, str] = {
+        "full": "Full",
+        "partial": "Partial",
+        "founder_provided": "Founder Provided",
+        "researched": "Researched",
+        "agent_estimate": "Agent Estimate",
+        "founder_override": "Founder Override",
+        "direct": "Direct",
+        "adjacent": "Adjacent",
+        "do_nothing": "Do Nothing",
+        "emerging": "Emerging",
+        "custom": "Custom",
+        "building": "Building",
+        "stable": "Stable",
+        "eroding": "Eroding",
+        "strong": "Strong",
+        "moderate": "Moderate",
+        "weak": "Weak",
+        "absent": "Absent",
+        "not_applicable": "N/A",
+        "high": "High",
+        "low": "Low",
+        "network_effects": "Network Effects",
+        "data_advantages": "Data Advantages",
+        "switching_costs": "Switching Costs",
+        "regulatory_barriers": "Regulatory Barriers",
+        "cost_structure": "Cost Structure",
+        "brand_reputation": "Brand Reputation",
+        "pre-seed": "Pre-Seed",
+        "seed": "Seed",
+        "series-a": "Series A",
+        "series-b": "Series B",
+        "series_a": "Series A",
+        "series_b": "Series B",
+        "later": "Later",
+        "growth": "Growth",
+        "deck": "Deck",
+        "conversation": "Conversation",
+        "document": "Document",
+    }
+    return _LABELS.get(value, value.replace("_", " ").title() if value else "?")
+
+
 def _warn(code: str, message: str) -> dict[str, Any]:
     """Create a warning dict with code, message, and severity."""
     return {
@@ -471,7 +516,7 @@ def _section_executive_summary(
     if product_profile is not None and not _is_stub(product_profile):
         lines.append(f"**Company:** {product_profile.get('company_name', '?')}")
         lines.append(f"**Product:** {product_profile.get('product_description', '?')}")
-        lines.append(f"**Stage:** {product_profile.get('stage', '?')}")
+        lines.append(f"**Stage:** {_humanize(str(product_profile.get('stage', '?')))}")
         lines.append(f"**Sector:** {product_profile.get('sector', '?')}")
         lines.append("")
 
@@ -526,7 +571,7 @@ def _section_competitor_landscape(landscape: dict[str, Any] | None) -> str:
     competitors = _as_list(landscape.get("competitors"))
     lines = ["## Competitor Landscape\n"]
     lines.append(f"**Competitors Analyzed:** {len(competitors)}")
-    lines.append(f"**Input Mode:** {landscape.get('input_mode', '?')}")
+    lines.append(f"**Input Mode:** {_humanize(str(landscape.get('input_mode', '?')))}")
     lines.append("")
 
     lines.append("| Name | Category | Research Depth | Sourced Fields |")
@@ -534,8 +579,8 @@ def _section_competitor_landscape(landscape: dict[str, Any] | None) -> str:
     for c in competitors:
         c = _as_dict(c)
         name = c.get("name", "?")
-        cat = c.get("category", "?")
-        rd = c.get("research_depth", "?")
+        cat = _humanize(str(c.get("category", "?")))
+        rd = _humanize(str(c.get("research_depth", "?")))
         sfc = c.get("sourced_fields_count", "?")
         lines.append(f"| {name} | {cat} | {rd} | {sfc} |")
 
@@ -560,12 +605,12 @@ def _section_positioning(
         lines.append(f"### {vid} View\n")
         lines.append(f"- **X-Axis:** {view.get('x_axis_name', '?')}")
         lines.append(f"  - Rationale: {view.get('x_axis_rationale', '?')}")
-        vanity_x = " (VANITY)" if view.get("x_axis_vanity_flag") else ""
-        lines.append(f"  - Vanity flag: {view.get('x_axis_vanity_flag', '?')}{vanity_x}")
+        vanity_x = "Yes — axis may not reveal meaningful differentiation" if view.get("x_axis_vanity_flag") else "No"
+        lines.append(f"  - Vanity axis: {vanity_x}")
         lines.append(f"- **Y-Axis:** {view.get('y_axis_name', '?')}")
         lines.append(f"  - Rationale: {view.get('y_axis_rationale', '?')}")
-        vanity_y = " (VANITY)" if view.get("y_axis_vanity_flag") else ""
-        lines.append(f"  - Vanity flag: {view.get('y_axis_vanity_flag', '?')}{vanity_y}")
+        vanity_y = "Yes — axis may not reveal meaningful differentiation" if view.get("y_axis_vanity_flag") else "No"
+        lines.append(f"  - Vanity axis: {vanity_y}")
         lines.append(f"- **Differentiation Score:** {view.get('differentiation_score', '?')}%")
         lines.append(
             f"- **Startup Rank:** X={view.get('startup_x_rank', '?')}, "
@@ -588,8 +633,8 @@ def _section_moat_assessment(moat_scores: dict[str, Any] | None) -> str:
     startup = _as_dict(companies.get("_startup"))
 
     if startup:
-        defensibility = startup.get("overall_defensibility", "?")
-        strongest = startup.get("strongest_moat", "none")
+        defensibility = _humanize(str(startup.get("overall_defensibility", "?")))
+        strongest = _humanize(str(startup.get("strongest_moat", "none")))
         lines.append(f"**Overall Defensibility:** {defensibility}")
         lines.append(f"**Strongest Moat:** {strongest}")
         lines.append("")
@@ -599,10 +644,10 @@ def _section_moat_assessment(moat_scores: dict[str, Any] | None) -> str:
         lines.append("|------|--------|------------|----------------|")
         for moat in _as_list(startup.get("moats")):
             moat = _as_dict(moat)
-            mid = moat.get("id", "?")
-            status = moat.get("status", "?")
-            traj = moat.get("trajectory", "?")
-            src = moat.get("evidence_source", "?")
+            mid = _humanize(str(moat.get("id", "?")))
+            status = _humanize(str(moat.get("status", "?")))
+            traj = _humanize(str(moat.get("trajectory", "?")))
+            src = _humanize(str(moat.get("evidence_source", "?")))
             lines.append(f"| {mid} | {status} | {traj} | {src} |")
         lines.append("")
 
@@ -613,7 +658,7 @@ def _section_moat_assessment(moat_scores: dict[str, Any] | None) -> str:
         lines.append("### Startup Ranking by Moat Dimension\n")
         for dim, rank_info in startup_rank.items():
             ri = _as_dict(rank_info)
-            lines.append(f"- **{dim}:** Rank {ri.get('rank', '?')} of {ri.get('total', '?')}")
+            lines.append(f"- **{_humanize(dim)}:** Rank {ri.get('rank', '?')} of {ri.get('total', '?')}")
         lines.append("")
 
     return "\n".join(lines) + "\n"
