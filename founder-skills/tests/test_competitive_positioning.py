@@ -2053,10 +2053,7 @@ class TestCompose:
             _make_artifact_dir(tmp)
             rc_base, data_base, _ = run_script("compose_report.py", args=["--dir", tmp, "--pretty"])
             assert rc_base == 0
-            base_incomplete = [
-                w for w in data_base["warnings"]
-                if w.get("code") == "INCOMPLETE_SCORING"
-            ]
+            base_incomplete = [w for w in data_base["warnings"] if w.get("code") == "INCOMPLETE_SCORING"]
 
         with tempfile.TemporaryDirectory() as tmp:
             _make_artifact_dir(tmp)
@@ -2072,10 +2069,7 @@ class TestCompose:
             rc, data, stderr = run_script("compose_report.py", args=["--dir", tmp, "--pretty"])
             assert rc == 0, f"Expected exit 0, got {rc}. stderr: {stderr}"
             assert data is not None
-            incomplete = [
-                w for w in data["warnings"]
-                if w.get("code") == "INCOMPLETE_SCORING"
-            ]
+            incomplete = [w for w in data["warnings"] if w.get("code") == "INCOMPLETE_SCORING"]
             assert len(incomplete) == len(base_incomplete), (
                 f"Slug normalization failed: got {len(incomplete)} INCOMPLETE_SCORING "
                 f"warnings vs {len(base_incomplete)} baseline. Warnings: {incomplete}"
@@ -2089,9 +2083,7 @@ class TestCompose:
             pos_path = os.path.join(tmp, "positioning.json")
             with open(pos_path) as f:
                 positioning = json.load(f)
-            first_slug = next(
-                s for s in positioning["moat_assessments"] if s != "_startup"
-            )
+            first_slug = next(s for s in positioning["moat_assessments"] if s != "_startup")
             positioning["moat_assessments"][first_slug]["moats"][0]["evidence_source"] = "founder_override"
             with open(pos_path, "w") as f:
                 json.dump(positioning, f)
@@ -2106,9 +2098,7 @@ class TestCompose:
             pos_path = os.path.join(tmp, "positioning.json")
             with open(pos_path) as f:
                 positioning = json.load(f)
-            first_slug = next(
-                s for s in positioning["moat_assessments"] if s != "_startup"
-            )
+            first_slug = next(s for s in positioning["moat_assessments"] if s != "_startup")
             positioning["moat_assessments"][first_slug]["moats"][0]["evidence_source"] = "founder_override"
             dict_moats = positioning["moat_assessments"]
             array_moats = []
