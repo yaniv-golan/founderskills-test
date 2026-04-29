@@ -1,11 +1,11 @@
 ---
 name: competitive-positioning
 disable-model-invocation: true
-description: "Maps a startup's competitive landscape, scores moat strength across 6+ dimensions, and generates an investor-ready competition narrative with positioning map. Use when user asks to 'analyze my competition', 'map competitors', 'evaluate our moat', 'competitive landscape', 'competition slide help', 'defensibility analysis', 'who are my competitors', 'how do we differentiate', or provides a pitch deck or competitive analysis document for competitive positioning feedback. Do NOT use for pitch deck review (use deck-review), market sizing, or financial model analysis."
+description: "Maps a startup's competitive landscape, scores moat strength across 6+ dimensions, and generates an investor-ready competition narrative with positioning map."
 compatibility: Requires Python 3.10+ and uv for script execution.
 metadata:
   author: lool-ventures
-  version: "0.2.0"
+  version: "0.3.0"
 imports:
   - "deck-review:checklist.json (optional — competition slide claims for cross-validation)"
   - "market-sizing:sizing.json (optional — validate market claims in positioning)"

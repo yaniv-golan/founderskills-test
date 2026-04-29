@@ -1,11 +1,11 @@
 ---
 name: deck-review
 disable-model-invocation: true
-description: "Scores and strengthens startup pitch decks against 35 investor-grade criteria before founders send them to VCs. Use when user asks to 'review my deck', 'pitch deck feedback', 'check my slides', 'is my deck ready', 'review this pitch deck', 'deck critique', 'improve my pitch deck', 'what's wrong with my deck', 'pitch deck review', 'fundraising deck feedback', or provides a pitch deck (PDF, PPTX, markdown, or text) for evaluation. Covers pre-seed, seed, and Series A against current best practices from Sequoia, DocSend, YC, a16z, and Carta data. Do NOT use for financial model review, market sizing, or general document editing."
+description: "Scores and strengthens startup pitch decks (pre-seed through Series A) against 35 investor-grade criteria grounded in Sequoia, DocSend, YC, a16z, and Carta data."
 compatibility: Requires Python 3.10+ and uv for script execution.
 metadata:
   author: lool-ventures
-  version: "0.2.0"
+  version: "0.3.0"
 exports:
   - "checklist.json -> financial-model-review, ic-sim, fundraise-readiness"
 ---
