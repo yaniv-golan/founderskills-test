@@ -5,7 +5,7 @@ description: "Scores and strengthens startup pitch decks (pre-seed through Serie
 compatibility: Requires Python 3.10+ and uv for script execution.
 metadata:
   author: lool-ventures
-  version: "0.3.0"
+  version: "0.4.0"
 exports:
   - "checklist.json -> financial-model-review, ic-sim, fundraise-readiness"
 ---
@@ -18,56 +18,63 @@ Help startup founders strengthen their pitch decks before sending them to invest
 
 Accept any format: PDF, PowerPoint (PPTX), markdown, or text descriptions of slides.
 
+## Architecture (v0.4.0)
+
+This skill follows the Phase 0 / Phase A / Phase B handoff architecture so it works in both Cowork sub-agent dispatch (where sub-agents have no Bash) and Cowork main-session / CLI (where Bash is available):
+
+- **Phase 0 — Setup** (caller's main session in handoff mode; inline in Local mode): create `$REVIEW_DIR`, run `founder_context.py`, resolve cross-skill imports.
+- **Phase A — Data collection** (sub-agent in handoff mode; inline in Local mode): read deck, produce four JSON artifacts via the Write tool, emit `RUN_MANIFEST.json`. **No scripts in Phase A.**
+- **Phase B — Computation + composition** (caller in handoff mode; inline in Local mode): runs the manifest's steps (`checklist.py` → `compose_report.py` → `visualize.py`) via `phase_b_runner.py`.
+
 ## Available Scripts
 
 All scripts are at `${CLAUDE_PLUGIN_ROOT}/skills/deck-review/scripts/`:
 
-- **`checklist.py`** — Scores 35 criteria across 7 categories (pass/fail/warn/not_applicable)
-- **`compose_report.py`** — Assembles artifacts into final report with cross-artifact validation; `--strict` exits 1 on high/medium warnings
-- **`visualize.py`** — Generates self-contained HTML with SVG charts (not JSON)
+- **`checklist.py`** — Validates and aggregates the 35-criteria scoring (Phase B)
+- **`compose_report.py`** — Assembles artifacts into final report; `--strict` exits 1 on high/medium warnings (Phase B)
+- **`visualize.py`** — Generates self-contained HTML with SVG charts (Phase B)
 
-Also available from `${CLAUDE_PLUGIN_ROOT}/scripts/` (shared):
+Shared scripts at `${CLAUDE_PLUGIN_ROOT}/scripts/`:
 
-- **`founder_context.py`** — Per-company context management (init/read/merge/validate)
-
-Run with: `python3 ${CLAUDE_PLUGIN_ROOT}/skills/deck-review/scripts/<script>.py --pretty [args]`
+- **`founder_context.py`** — Per-company context (init/read/merge/validate) (Phase 0)
+- **`find_artifact.py`** — Cross-skill artifact resolution (Phase 0)
+- **`phase_b_runner.py`** — Phase B pipeline runner
 
 ## Available References
 
 Read as needed from `${CLAUDE_PLUGIN_ROOT}/skills/deck-review/references/`:
 
-- **`deck-best-practices.md`** — Full best practices: slide frameworks, stage-specific guidelines, design rules, AI-company requirements
-- **`checklist-criteria.md`** — Definitions for all 35 criteria with pass/fail/warn thresholds
+- **`deck-best-practices.md`** — Slide frameworks, stage guidelines, design rules, AI-company requirements
+- **`checklist-criteria.md`** — All 35 criteria with pass/fail/warn thresholds
 - **`artifact-schemas.md`** — JSON schemas for all artifacts
 
-## Artifact Pipeline
+Shared schema at `${CLAUDE_PLUGIN_ROOT}/skills/_shared/`:
 
-Every review deposits structured JSON artifacts into a working directory. The final step assembles all artifacts into a report and validates consistency. This is not optional.
+- **`run_manifest_schema.md`** — RUN_MANIFEST.json contract
 
-| Step | Artifact | Producer |
-|------|----------|----------|
-| 1 | founder context | `founder_context.py` read/init |
-| 2 | `deck_inventory.json` | Agent (heredoc) |
-| 3 | `stage_profile.json` | Agent (heredoc) |
-| 4 | `slide_reviews.json` | Agent (heredoc) |
-| 5 | `checklist.json` | `checklist.py` |
-| 6 | Report | `compose_report.py` |
+## Phase A artifacts
 
-**Rules:**
-- Deposit each artifact before proceeding to the next step
-- For agent-written artifacts (Steps 2-4), consult `references/artifact-schemas.md` for the JSON schema
-- If a step is not applicable, deposit a stub: `{"skipped": true, "reason": "..."}`
+| Artifact | Required | Producer | Notes |
+|---|---|---|---|
+| `deck_inventory.json` | yes | agent (Write) | Slide-by-slide extraction |
+| `stage_profile.json` | yes | agent (Write) | Stage detection + AI flag |
+| `slide_reviews.json` | yes | agent (Write) | Per-slide critique |
+| `checklist_input.json` | yes | agent (Write) | 35-criteria scoring as heredoc payload for `checklist.py` |
+| `competitive_positioning_landscape.json` | optional | cross-skill import | Caller resolves and supplies path in handoff mode; agent runs `find_artifact.py` in Local mode |
 
-Keep the founder informed with brief, plain-language updates at each step. Never mention file names, scripts, or JSON. After each analytical step (4–5), share a one-sentence finding before moving on.
+Keep the founder informed with brief, plain-language updates at each step. Never mention file names, scripts, or JSON. After each analytical step, share a one-sentence finding before moving on.
 
-## Workflow
+---
 
-### Step 0: Path Setup
+## Phase 0: Setup
+
+### Local mode (CLI, Cowork main session)
 
 ```bash
 SCRIPTS="$CLAUDE_PLUGIN_ROOT/skills/deck-review/scripts"
 REFS="$CLAUDE_PLUGIN_ROOT/skills/deck-review/references"
 SHARED_SCRIPTS="$CLAUDE_PLUGIN_ROOT/scripts"
+FOUNDER_SKILLS_ROOT="$CLAUDE_PLUGIN_ROOT"
 if ls "$(pwd)"/mnt/*/ >/dev/null 2>&1; then
   ARTIFACTS_ROOT="$(ls -d "$(pwd)"/mnt/*/ | head -1)artifacts"
 elif ls "$(pwd)"/sessions/*/mnt/*/ >/dev/null 2>&1; then
@@ -77,35 +84,19 @@ else
 fi
 ```
 
-If `CLAUDE_PLUGIN_ROOT` is empty, fall back: `Glob` for `**/founder-skills/skills/deck-review/scripts/checklist.py`, strip to get `SCRIPTS`, derive `REFS` and `SHARED_SCRIPTS`.
+If `CLAUDE_PLUGIN_ROOT` is empty, fall back: `Glob` for `**/founder-skills/skills/deck-review/scripts/checklist.py`, strip to get `SCRIPTS`, derive `REFS`, `SHARED_SCRIPTS`, `FOUNDER_SKILLS_ROOT`.
 
 **If `ARTIFACTS_ROOT` resolves to `$(pwd)/artifacts` but no `artifacts/` directory exists at `$(pwd)`:** The workspace may not be mounted yet. Use `Glob` with pattern `**/artifacts/founder_context.json` to locate existing artifacts, and derive `ARTIFACTS_ROOT` from the result. If nothing is found, `mkdir -p "$ARTIFACTS_ROOT"` and proceed.
 
-After Step 1 (when the slug is known):
-
-```bash
-REVIEW_DIR="$ARTIFACTS_ROOT/deck-review-${SLUG}"
-mkdir -p "$REVIEW_DIR"
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-```
-
-Pass `RUN_ID` to all sub-agents. Every artifact written to `$REVIEW_DIR` must include `"metadata": {"run_id": "$RUN_ID"}` at the top level. `compose_report.py` checks that all artifact run IDs match — a mismatch triggers a `STALE_ARTIFACT` high-severity warning, blocking under `--strict`.
-
-If `REVIEW_DIR` already contains artifacts from a previous run, remove them before starting:
-
-    rm -f "$REVIEW_DIR"/{deck_inventory,stage_profile,slide_reviews,checklist,report}.json "$REVIEW_DIR"/report.{html,md}
-
-In Cowork, file deletion may require explicit permission. If cleanup fails with "Operation not permitted", request delete permission and retry before proceeding.
-
-### Step 1: Read or Create Founder Context
+#### Step 0.1: Read or Create Founder Context
 
 ```bash
 python3 "$SHARED_SCRIPTS/founder_context.py" read --artifacts-root "$ARTIFACTS_ROOT" --pretty
 ```
 
-**Exit 0 (found):** Use the company slug and pre-filled fields. Proceed to Step 2.
+**Exit 0 (found):** Use the company slug and pre-filled fields. Proceed to Step 0.2.
 
-**Exit 1 (not found):** This is normal for a first run — do not treat it as an error. Use `AskUserQuestion` (NOT plain chat) to ask for company name, stage, sector, and geography. Provide at least 2 options. Then create:
+**Exit 1 (not found):** First run — not an error. Use `AskUserQuestion` to ask for company name, stage, sector, and geography. Then create:
 
 ```bash
 python3 "$SHARED_SCRIPTS/founder_context.py" init \
@@ -115,7 +106,40 @@ python3 "$SHARED_SCRIPTS/founder_context.py" init \
 
 **Exit 2 (multiple):** Present the list, ask which company, re-read with `--slug`.
 
-### Step 2: Ingest Deck -> `deck_inventory.json`
+#### Step 0.2: Set up the review directory
+
+```bash
+WORK_DIR="$ARTIFACTS_ROOT/deck-review-${SLUG}"
+mkdir -p "$WORK_DIR"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+Every artifact written to `$WORK_DIR` must include `"metadata": {"run_id": "$RUN_ID"}` at the top level. `compose_report.py` checks that all artifact run IDs match — a mismatch triggers a `STALE_ARTIFACT` high-severity warning, blocking under `--strict`.
+
+If `WORK_DIR` already contains artifacts from a previous run, remove them before starting:
+
+    rm -f "$WORK_DIR"/{deck_inventory,stage_profile,slide_reviews,checklist_input,checklist,report,RUN_MANIFEST,RUN_RESULT}.json "$WORK_DIR"/report.{html,md}
+
+In Cowork, file deletion may require explicit permission. If cleanup fails with "Operation not permitted", request delete permission and retry before proceeding.
+
+### Handoff mode (Cowork sub-agent dispatch)
+
+The **caller** (user's main session) runs Phase 0 *before* dispatching this sub-agent. Sub-agents in Cowork have no Bash, so the steps above cannot run inside Phase A.
+
+The caller passes the following in the dispatch prompt, which the sub-agent reads at Phase A entry:
+
+- `WORK_DIR` — absolute path
+- `RUN_ID` — string per founder-context conventions
+- Founder context — either inline JSON or a path to `$WORK_DIR/founder_context.json`
+- Cross-skill imports — absolute paths to artifacts the consumer may need (e.g., `competitive_positioning_landscape = /abs/path/to/landscape.json`)
+
+If the dispatch prompt is missing required Phase 0 outputs, the sub-agent's Phase A emits `RUN_MANIFEST.json` with `phase_a_complete: false` and either `phase_a_missing` or `cross_skill_import_required` populated, then stops.
+
+---
+
+## Phase A: data collection (judgment-only, no scripts)
+
+### Step A1: Ingest Deck → `deck_inventory.json`
 
 **Ingestion pitfalls — common issues that degrade review quality:**
 
@@ -127,13 +151,17 @@ python3 "$SHARED_SCRIPTS/founder_context.py" init \
 
 Read the provided deck. For each slide, extract: headline, content summary, visuals description, word count estimate. Record metadata: company name, total slides, format, any claimed stage or raise amount.
 
-### Step 3: Detect Stage -> `stage_profile.json`
+Write the result to `$WORK_DIR/deck_inventory.json` via the Write tool. Consult `references/artifact-schemas.md` for the schema.
+
+### Step A2: Detect Stage → `stage_profile.json`
 
 Determine pre-seed/seed/series-a from signals in the deck. Read `references/deck-best-practices.md` for stage-specific frameworks. Record: detected stage, confidence, evidence, whether AI company, expected slide framework, stage benchmarks.
 
 **Stage signals:** Pre-seed: no revenue, LOIs/waitlist, prototype, <$2.5M ask. Seed: early ARR, paying customers, <$6M ask. Series A: $1M+ ARR, cohort data, repeatable GTM, $10M+ ask. Later-stage: set detected_stage to `"series_b"` or `"growth"` — use the Gate below. Do not ask outside the gate.
 
 **AI company detection signals:** The company is AI-first if ANY of: (1) core product uses ML/AI for its primary value proposition, (2) inference or training costs appear in COGS or margins, (3) deck mentions foundation models, fine-tuning, or AI infrastructure as product components, (4) retention or engagement metrics reference AI-specific patterns (usage retention vs. seat retention). Set `is_ai_company: true` and record the evidence in `ai_evidence`. When in doubt, flag it — the gate will let the founder correct.
+
+Write the result to `$WORK_DIR/stage_profile.json` via the Write tool.
 
 ### Gate: Confirm Stage and Scope
 
@@ -169,7 +197,7 @@ Options: `Stop review` / `Different stage` / `Proceed anyway (best-effort)`
 
 This two-step pattern (chat message then AskUserQuestion) is required because AskUserQuestion renders as plain text. Detailed content goes in the chat message; only the gate question goes in AskUserQuestion.
 
-**If the founder selects "Looks right":** Proceed to Step 4 (Review Each Slide) with the detected stage.
+**If the founder selects "Looks right":** Proceed to Step A4 with the detected stage.
 
 **If the founder selects "Different stage":** Ask which stage they want to use (pre-seed / seed / series-a / series-b / growth). Then rebuild `stage_profile.json` for the corrected stage (do not re-read the deck or re-detect signals — the deck evidence is unchanged): re-read `references/deck-best-practices.md` for the new stage's framework and benchmarks, rebuild the artifact, and repeat the gate.
 
@@ -180,62 +208,143 @@ For the rebuilt `stage_profile.json`:
 - `is_ai_company`, `ai_evidence`: unchanged from original detection unless the founder also corrected those inputs
 - `expected_framework`, `stage_benchmarks`: rebuild from `deck-best-practices.md` only if the corrected stage is `pre_seed`, `seed`, or `series_a`
 
-**If the corrected stage is still `"series_b"` or `"growth"`:** stop after the gate. Do not continue to Step 4 or any later steps. Do **not** use Series A as a proxy for later-stage companies.
+**If the corrected stage is still `"series_b"` or `"growth"`:** stop after the gate. Do not continue. Do **not** use Series A as a proxy for later-stage companies.
 
-**If the founder selects "Stop review":** stop the skill here. Do not continue to Step 4 (Review Each Slide), Step 5 (Score Checklist), or report composition.
+**If the founder selects "Stop review":** stop the skill here.
 
 **If "Proceed anyway (best-effort)":** Use Series A criteria as the closest available proxy. Set `confidence: "low"` in `stage_profile.json` and add `"Founder chose best-effort review for out-of-scope stage"` to evidence. Include a prominent disclaimer in the final coaching commentary that scoring criteria are calibrated for pre-seed through Series A and may not reflect later-stage investor expectations.
 
 **If "Not sure — proceed anyway":** Use the detected stage but note the uncertainty in `stage_profile.json` under `confidence: "low"`. Mention in the final coaching commentary that the founder should confirm their stage positioning.
 
-### Step 4: Review Each Slide -> `slide_reviews.json`
+### Step A4: Review Each Slide → `slide_reviews.json`
 
 Compare each slide against the stage-specific framework and non-negotiable principles. For each slide: identify strengths, weaknesses, and specific recommendations. Map to expected framework. Flag missing expected slides.
 
 **Critical:** Every critique must cite a specific best-practice principle. No vague feedback.
 
-### Step 5: Score Checklist -> `checklist.json`
+Write the result to `$WORK_DIR/slide_reviews.json` via the Write tool.
+
+### Step A5: Score Checklist → `checklist_input.json`
 
 Evaluate all 35 criteria from `references/checklist-criteria.md`. For non-AI companies, mark AI category items as `not_applicable`.
 
-```bash
-cat <<'CHECKLIST_EOF' | python3 "$SCRIPTS/checklist.py" --pretty -o "$REVIEW_DIR/checklist.json"
+Write the agent-judgment payload to `$WORK_DIR/checklist_input.json` via the Write tool. The schema is the same heredoc payload `checklist.py` previously consumed:
+
+```json
 {
   "items": [
     {"id": "purpose_clear", "status": "pass", "evidence": "Sequoia: single declarative sentence", "notes": "Clear one-liner with quantified outcome"},
     ...all 35 items...
   ]
 }
-CHECKLIST_EOF
 ```
+
+`checklist.py` runs in Phase B and reads this file via stdin (the runner pipes it).
 
 **Evidence quality rules:**
 - Every `fail` and `warn` MUST cite a specific best-practice principle or benchmark (e.g., "Sequoia: single declarative sentence" or "DocSend: median 11 slides for seed").
 - Every `pass` MUST note what was checked — not just "pass" with empty evidence.
 - `not_applicable` items MUST include a reason (e.g., "Not an AI company — AI category gated").
-- Empty `evidence` on any non-pass item = quality gate failure. Fix before running compose.
+- Empty `evidence` on any non-pass item = quality gate failure. Fix before writing the manifest.
 
-### Step 6: Compose Report
+### Step A-final: Verify and write `RUN_MANIFEST.json`
 
-```bash
-python3 "$SCRIPTS/compose_report.py" --dir "$REVIEW_DIR" --pretty -o "$REVIEW_DIR/report.json"
+Verify each required Phase A artifact exists at `$WORK_DIR` (use Glob). Then write `$WORK_DIR/RUN_MANIFEST.json`:
+
+```json
+{
+  "schema_version": 1,
+  "skill": "deck-review",
+  "plugin_version": "0.4.0",
+  "run_id": "<RUN_ID>",
+  "phase_a_complete": true,
+  "phase_a_artifacts": [
+    {"path": "deck_inventory.json", "required": true},
+    {"path": "stage_profile.json", "required": true},
+    {"path": "slide_reviews.json", "required": true},
+    {"path": "checklist_input.json", "required": true}
+  ],
+  "phase_a_missing": [],
+  "phase_b_pending": true,
+  "phase_b_steps": [
+    {
+      "id": "validate_checklist",
+      "step_type": "subprocess",
+      "cmd": ["python3", "$SCRIPTS/checklist.py", "-o", "$WORK_DIR/checklist.json", "--pretty"],
+      "stdin_from": "checklist_input.json",
+      "produces": "checklist.json"
+    },
+    {
+      "id": "compose",
+      "step_type": "subprocess",
+      "cmd": ["python3", "$SCRIPTS/compose_report.py", "--dir", "$WORK_DIR", "-o", "$WORK_DIR/report.json", "--pretty"],
+      "produces": "report.json",
+      "depends_on": ["validate_checklist"]
+    },
+    {
+      "id": "visualize",
+      "step_type": "subprocess",
+      "cmd": ["python3", "$SCRIPTS/visualize.py", "--dir", "$WORK_DIR", "-o", "$WORK_DIR/report.html"],
+      "produces": "report.html",
+      "depends_on": ["compose"]
+    }
+  ]
+}
 ```
 
-Fix high-severity warnings and re-run. Use `--strict` to enforce a clean report.
+If any required artifact is missing, write the manifest with `phase_a_complete: false` and `phase_a_missing` populated, then stop.
 
-**Primary deliverable:** Read `report_markdown` from the output JSON, write it to `$REVIEW_DIR/report.md`, and display it to the user in full. **Present the file path** so the user can access it directly. Then add coaching commentary.
+---
 
-### Step 7 (Optional): Generate Visual Report
+## Phase B: invoke the runner
+
+(See `${CLAUDE_PLUGIN_ROOT}/skills/_shared/phase_b_template.md` for the full template — included by reference here.)
+
+**Default invocation (batch, Local mode):**
 
 ```bash
-python3 "$SCRIPTS/visualize.py" --dir "$REVIEW_DIR" -o "$REVIEW_DIR/report.html"
+python3 "$FOUNDER_SKILLS_ROOT/scripts/phase_b_runner.py" \
+  --manifest "$WORK_DIR/RUN_MANIFEST.json" \
+  --work-dir "$WORK_DIR" \
+  --scripts "$SCRIPTS" \
+  --run-result "$WORK_DIR/RUN_RESULT.json"
 ```
 
-**Present the HTML file path** to the user so they can open the visual report.
+Read `$WORK_DIR/RUN_RESULT.json`:
 
-### Step 8: Deliver Artifacts
+- `phase_b_status: success` — proceed to Step Final.
+- `phase_b_status: partial` or `failed` — surface the failed step's stderr to the user. Do not fabricate the missing pieces.
 
-Copy final deliverables to workspace root: `{Company}_Deck_Review.md`, `.html` (if generated), `.json` (optional).
+**If the Bash invocation fails** (Cowork sub-agent dispatch — Bash filtered): final message must be exactly:
+
+```
+**REVIEW INCOMPLETE — Phase B required**
+
+Phase A finished. The caller MUST run phase_b_runner.py against the
+manifest below or this review is incomplete.
+
+  Manifest: <ABS_WORK_DIR>/RUN_MANIFEST.json
+
+Caller invocation:
+  python3 <FOUNDER_SKILLS_ROOT>/scripts/phase_b_runner.py \
+    --manifest <ABS_WORK_DIR>/RUN_MANIFEST.json \
+    --work-dir <ABS_WORK_DIR> \
+    --scripts <ABS_SCRIPTS_PATH> \
+    --run-result <ABS_WORK_DIR>/RUN_RESULT.json
+```
+
+Substitute the actual absolute paths.
+
+---
+
+## Step Final: Deliver Artifacts
+
+After Phase B succeeds:
+
+1. Read `report_markdown` from `$WORK_DIR/report.json`, write it to `$WORK_DIR/report.md`, and display it to the user in full.
+2. Present the file paths: `report.md`, `report.html` (if generated).
+3. Add coaching commentary.
+4. Optionally copy to workspace root: `{Company}_Deck_Review.md`, `.html`, `.json`.
 
 ## Gotchas
 

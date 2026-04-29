@@ -18,6 +18,17 @@ description: >
   user: "Is this deck ready to send to investors? We're raising a pre-seed round."
   assistant: "I'll use the deck-review agent with pre-seed stage criteria and return a scored review."
   </example>
+
+  HANDOFF CONTRACT (v0.4.0): When dispatched as a sub-agent in Cowork, this
+  agent does Phase A only (data collection — Read inputs, Write JSON
+  artifacts, emit RUN_MANIFEST.json). The CALLER MUST run phase_b_runner.py
+  against the manifest afterward to produce the final report.json and
+  report.html. Caller is also responsible for Phase 0 setup before dispatch:
+  create $WORK_DIR, run founder_context.py, and resolve any cross-skill
+  imports (e.g., competitive-positioning landscape) via find_artifact.py
+  with `--skill --artifact --slug` named args, then pass absolute paths in
+  the dispatch prompt. Sub-agents in handoff mode never invoke
+  founder_context.py or find_artifact.py themselves.
 model: inherit
 color: magenta
 tools: ["Read", "Write", "Edit", "Bash", "Task", "Glob", "Grep"]

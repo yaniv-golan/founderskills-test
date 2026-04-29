@@ -1,0 +1,168 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RUN_MANIFEST",
+  "description": "Phase A → Phase B handoff manifest emitted by founder-skills sub-agents. The caller's main session reads this manifest and runs phase_b_runner.py against it.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "skill",
+    "plugin_version",
+    "run_id",
+    "phase_a_complete",
+    "phase_a_artifacts",
+    "phase_a_missing",
+    "phase_b_pending",
+    "phase_b_steps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Currently 1. Bump on breaking schema changes."
+    },
+    "skill": {
+      "type": "string",
+      "description": "Skill identifier (e.g., 'deck-review')."
+    },
+    "plugin_version": {
+      "type": "string",
+      "description": "Plugin version that wrote this manifest."
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Unique per run."
+    },
+    "phase_a_complete": {
+      "type": "boolean",
+      "description": "If false, runner refuses to run Phase B."
+    },
+    "phase_a_artifacts": {
+      "type": "array",
+      "description": "Artifacts produced (or expected) by Phase A. Paths are relative to $WORK_DIR.",
+      "items": {
+        "type": "object",
+        "required": ["path", "required"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "required": {"type": "boolean"}
+        }
+      }
+    },
+    "phase_a_missing": {
+      "type": "array",
+      "description": "Phase A artifacts the sub-agent expected but did not produce. Empty when phase_a_complete=true.",
+      "items": {"type": "string"}
+    },
+    "step_0_required": {
+      "type": "object",
+      "description": "Present when phase_a_complete=false due to missing pre-extraction (currently FMR xlsx). Caller runs the cmd then re-dispatches.",
+      "required": ["reason", "cmd", "next_step"],
+      "additionalProperties": false,
+      "properties": {
+        "reason": {"type": "string"},
+        "cmd": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1
+        },
+        "placeholders": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "next_step": {"type": "string"}
+      }
+    },
+    "cross_skill_import_required": {
+      "type": "object",
+      "description": "Present when phase_a_complete=false because a needed cross-skill import wasn't supplied in the dispatch prompt.",
+      "required": ["import_id", "reason", "find_command", "next_step"],
+      "additionalProperties": false,
+      "properties": {
+        "import_id": {"type": "string"},
+        "reason": {"type": "string"},
+        "find_command": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1
+        },
+        "placeholders": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "next_step": {"type": "string"}
+      }
+    },
+    "phase_b_pending": {
+      "type": "boolean",
+      "description": "Always true in v0.4.0."
+    },
+    "phase_b_steps": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/step"}
+    }
+  },
+  "definitions": {
+    "step": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Unique within manifest. Lower-snake-case."
+        },
+        "step_type": {
+          "type": "string",
+          "enum": ["subprocess", "rename", "noop-halt"],
+          "default": "subprocess"
+        },
+        "cmd": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Argv for subprocess steps. Placeholders: $WORK_DIR, $SCRIPTS, $SHARED_SCRIPTS, $FOUNDER_SKILLS_ROOT."
+        },
+        "stdin_from": {
+          "type": "string",
+          "description": "subprocess only. Relative-to-$WORK_DIR path of file piped to script's stdin."
+        },
+        "from_path": {"type": "string", "description": "rename only. Relative-to-$WORK_DIR."},
+        "to_path": {"type": "string", "description": "rename only. Relative-to-$WORK_DIR."},
+        "halt": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true and step succeeds, runner exits with halted_for_user."
+        },
+        "halt_message": {
+          "type": "string",
+          "description": "Free-text instruction for the caller to surface to the consumer (human or agent)."
+        },
+        "halt_data": {
+          "type": "object",
+          "description": "Structured halt info.",
+          "properties": {
+            "consumer": {"type": "string", "enum": ["human", "agent"]},
+            "expected_upload_artifact": {"type": "string"},
+            "expected_artifact": {"type": "string"}
+          }
+        },
+        "produces": {
+          "type": "string",
+          "description": "Expected output artifact path (relative to $WORK_DIR). Used for diagnostics; not enforced."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": []
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300
+        }
+      }
+    }
+  }
+}
