@@ -1,0 +1,1448 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Generate self-contained HTML visualization from deck review JSON artifacts.
+
+Outputs HTML (not JSON). See compose_report.py for JSON output.
+
+Usage:
+    python visualize.py --dir ./deck-review-acme-corp/
+    python visualize.py --dir ./deck-review-acme-corp/ -o report.html
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import math
+import os
+import sys
+from typing import Any, TypeGuard
+
+# Shared with compose_report.py so both renderers suppress the same bad `notes`.
+# Same-dir import, matching the guarded pattern used for _theme below.
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _notes  # noqa: E402
+import _thresholds  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Artifact loading infrastructure
+# ---------------------------------------------------------------------------
+
+_CORRUPT: dict[str, Any] = {"__corrupt__": True}
+
+REQUIRED_ARTIFACTS = [
+    "deck_inventory.json",
+    "stage_profile.json",
+    "slide_reviews.json",
+    "checklist.json",
+    # visualize.py carries its OWN required list, independent of compose's. A finding
+    # rendered in report.md and absent from the report.html the founder actually opens
+    # is the delivery-defect class this fleet has shipped before.
+    "reconciliation.json",
+]
+
+
+def _load_artifact(dir_path: str, name: str) -> dict[str, Any] | None:
+    """Load a JSON artifact. Returns None if missing, _CORRUPT if unparseable."""
+    path = os.path.join(dir_path, name)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)  # type: ignore[no-any-return]
+    except (json.JSONDecodeError, OSError):
+        return _CORRUPT
+
+
+def _is_stub(data: dict[str, Any] | None) -> bool:
+    """Check if artifact is a stub (intentionally skipped)."""
+    return isinstance(data, dict) and data.get("skipped") is True
+
+
+def _usable(data: dict[str, Any] | None) -> TypeGuard[dict[str, Any]]:
+    """Check if artifact is loaded, not corrupt, and not a stub."""
+    return data is not None and data is not _CORRUPT and not _is_stub(data)
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Coerce to list -- returns [] if not a list."""
+    return value if isinstance(value, list) else []
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Coerce to dict -- returns {} if not a dict."""
+    return value if isinstance(value, dict) else {}
+
+
+def _write_output(data: str, output_path: str | None, *, summary: dict[str, Any] | None = None) -> None:
+    """Write raw HTML string to file or stdout."""
+    if output_path:
+        abs_path = os.path.abspath(output_path)
+        parent = os.path.dirname(abs_path)
+        if parent == "/":
+            print(f"Error: output path resolves to root directory: {output_path}", file=sys.stderr)
+            sys.exit(1)
+        os.makedirs(parent, exist_ok=True)
+        with open(abs_path, "w", encoding="utf-8") as f:
+            f.write(data)
+        receipt: dict[str, Any] = {"ok": True, "path": abs_path, "bytes": len(data.encode("utf-8"))}
+        if summary:
+            receipt.update(summary)
+        sys.stdout.write(json.dumps(receipt, separators=(",", ":")) + "\n")
+    else:
+        sys.stdout.write(data)
+
+
+# ---------------------------------------------------------------------------
+# HTML safety helpers
+# ---------------------------------------------------------------------------
+
+
+def _esc(text: Any) -> str:
+    """Escape text for safe HTML embedding."""
+    return html.escape(str(text), quote=True)
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    """Safely convert to finite float."""
+    try:
+        result = float(value)
+        if not math.isfinite(result):
+            return default
+        return result
+    except (TypeError, ValueError):
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Color scheme
+# ---------------------------------------------------------------------------
+
+_COLOR_PRIMARY = "#0D549D"
+_CLR_ACCENT = "#21A2E3"
+_COLOR_PASS = "#2F8A56"
+_COLOR_WARN = "#C9892B"
+_COLOR_FAIL = "#C0392B"
+_COLOR_NA = "#A6AEB5"
+
+# ---------------------------------------------------------------------------
+# Framework type humanization
+# ---------------------------------------------------------------------------
+
+_FRAMEWORK_LABELS: dict[str, str] = {
+    "purpose": "Purpose",
+    "purpose_traction": "Purpose",
+    "problem": "Problem",
+    "why_now": "Why Now",
+    "solution_product": "Solution",
+    "early_signals": "Early Signals",
+    "traction_kpis": "Traction",
+    "cohort_data": "Cohort Data",
+    "ltv_cac": "LTV / CAC",
+    "market": "Market",
+    "competition": "Competition",
+    "business_model_pricing": "Business Model",
+    "gtm": "Go-to-Market",
+    "unit_economics": "Unit Economics",
+    "team": "Team",
+    "financials": "Financials",
+    "ask_milestones": "Ask & Milestones",
+    "extra": "Extra",
+    "appendix": "Appendix",
+}
+
+
+def _humanize_framework(raw: str) -> str:
+    """Convert maps_to value to human-readable label."""
+    return _FRAMEWORK_LABELS.get(raw, raw.replace("_", " ").title())
+
+
+# ---------------------------------------------------------------------------
+# Canonical category order
+# ---------------------------------------------------------------------------
+
+_CANONICAL_CATEGORIES = [
+    "Narrative Flow",
+    "Slide Content",
+    "Stage Fit",
+    "Design & Readability",
+    "Common Mistakes",
+    "AI Company",
+    "Diligence Readiness",
+]
+
+
+# The prefix `checklist.py` stamps on a criterion it auto-gated because no slide rendered.
+# Mirrors `compose_report.py`'s `_DESIGN_GATE_EVIDENCE`; standalone scripts cannot import
+# across each other, and `test_deck_review.py` pins the two in sync.
+_GATE_EVIDENCE = "Auto-gated: not_applicable — input_"
+
+
+def _gated_categories(checklist: dict[str, Any] | None) -> set[str]:
+    """Categories with nothing left to measure, so no percentage can honestly describe them.
+
+    Every category percentage on this page divides by `pass + fail + warn`, which EXCLUDES
+    `not_applicable`. Two failure modes come out of that, and BOTH are excluded here:
+
+      * a partially gated category -- four design criteria auto-gated for want of a slide
+        anyone could see, one survivor -- scored 1/1 = 100%, drawn on the radar's outer ring
+        and printed as a strength, on a deck nobody could look at;
+      * a FULLY not-applicable category -- the four AI criteria on any company that is not an
+        AI company -- has an empty denominator and fell to the `else` branch as 0.0, drawn at
+        the centre and labelled "0%". That is the common case, not an edge case, and reads as
+        total failure rather than "does not apply", which is worse than the 100%.
+
+    So the rule is denominator-based rather than gate-based: a category nothing measured
+    leaves the percentage surfaces entirely. The stacked breakdown still shows it, over a
+    total that includes `not_applicable`, which is where "does not apply" belongs.
+    """
+    gated: set[str] = set()
+    if not isinstance(checklist, dict):
+        return gated
+    for item in _as_list(checklist.get("items")):
+        if isinstance(item, dict) and str(item.get("evidence", "")).startswith(_GATE_EVIDENCE):
+            category = str(item.get("category", "") or "")
+            if category:
+                gated.add(category)
+    for cat, counts in _as_dict(_as_dict(checklist.get("summary")).get("by_category")).items():
+        c = _as_dict(counts)
+        if _num(c.get("pass"), 0) + _num(c.get("fail"), 0) + _num(c.get("warn"), 0) == 0:
+            gated.add(str(cat))
+    return gated
+
+
+def _design_gate_note(checklist: dict[str, Any] | None) -> str:
+    """Say, on the page the founder shares, that the design criteria were never assessed.
+
+    Removing the false 100% from the charts is only half the fix: without this the founder
+    opens a clean "Strong / 100%" with six categories and nothing anywhere saying four
+    criteria went unassessed. `report.md` has carried this note for a while; the shareable
+    HTML carried the number and not the caveat.
+    """
+    gated = [
+        item
+        for item in _as_list(_as_dict(checklist).get("items"))
+        if isinstance(item, dict) and str(item.get("evidence", "")).startswith(_GATE_EVIDENCE)
+    ]
+    if not gated:
+        return ""
+    reason = str(gated[0].get("evidence", ""))[len(_GATE_EVIDENCE) :]
+    if reason.startswith("quality=image_only"):
+        why = "its slides are images with no readable text layer"
+    elif reason.startswith("quality=partial"):
+        why = "not every page could be read"
+    else:
+        why = "it reached the review as text rather than as a rendered file"
+    return (
+        f'<p class="note"><strong>{len(gated)} design criteria could not be reviewed</strong> — '
+        f"{_esc(why)}, so nothing here judges how the deck looks. They are excluded from the "
+        f"score rather than counted against it, and the Design &amp; Readability category is left "
+        f"out of the charts above rather than scored on whichever criterion survived.</p>"
+    )
+
+
+def _ordered_categories(by_category: dict[str, Any]) -> list[str]:
+    """Return categories in canonical order, with unknown categories appended alphabetically."""
+    canonical_set = set(_CANONICAL_CATEGORIES)
+    unknown = sorted(k for k in by_category if k not in canonical_set)
+    return [c for c in _CANONICAL_CATEGORIES if c in by_category] + unknown
+
+
+# ---------------------------------------------------------------------------
+# Placeholder helper
+# ---------------------------------------------------------------------------
+
+
+def _placeholder(message: str) -> str:
+    """Return a styled placeholder div."""
+    return f'<div class="placeholder">{_esc(message)}</div>'
+
+
+# ---------------------------------------------------------------------------
+# CSS
+# ---------------------------------------------------------------------------
+
+
+def _css() -> str:
+    """Return the inline CSS for the report."""
+    return f"""
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: var(--font-body);
+            background: var(--lool-white);
+            color: var(--lool-ink);
+            line-height: 1.6;
+            padding: 2rem;
+            max-width: 960px;
+            margin: 0 auto;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }}
+        header {{
+            text-align: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 3px solid var(--lool-blue);
+        }}
+        header h1 {{
+            font-size: 1.75rem;
+            font-weight: 400;
+            color: var(--lool-blue);
+            letter-spacing: -0.01em;
+            margin-bottom: 0.25rem;
+        }}
+        header .subtitle {{
+            font-size: 0.9rem;
+            color: var(--lool-mute);
+        }}
+        main {{ display: flex; flex-direction: column; gap: 2rem; }}
+        .chart-section {{
+            background: var(--lool-paper);
+            border: 1px solid var(--lool-line-2);
+            border-radius: 0;
+            padding: 1.5rem;
+        }}
+        .chart-section h2 {{
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: var(--lool-royal);
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }}
+        .chart-container {{
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }}
+        .placeholder {{
+            text-align: center;
+            color: var(--lool-faint);
+            padding: 2rem;
+            font-style: italic;
+            background: var(--lool-paper-2);
+            border-radius: 0;
+        }}
+        footer {{
+            text-align: center;
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--lool-line-2);
+            color: var(--lool-faint);
+            font-size: 0.8rem;
+        }}
+        footer a, header a {{ color: var(--lool-azure); text-decoration: none; }}
+        footer a:hover, header a:hover {{ color: var(--lool-azure-deep); text-decoration: underline; }}
+        svg text {{ font-family: var(--font-body); }}
+        .collapsible-toggle {{
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0;
+        }}
+        .collapsible-toggle:hover {{ background: var(--lool-paper-2); border-radius: var(--r-input); }}
+        .chevron {{
+            display: inline-block;
+            transition: transform 0.2s;
+            font-size: 0.75rem;
+            color: var(--lool-faint);
+        }}
+        .collapsible-content {{ padding-left: 1.5rem; }}
+        .finding-item {{
+            padding: 0.75rem;
+            border-left: 3px solid var(--lool-line-2);
+            margin-bottom: 0.5rem;
+            border-radius: 0;
+        }}
+        .finding-strong {{ border-left-color: {_COLOR_PASS}; }}
+        .finding-attention {{ border-left-color: {_COLOR_FAIL}; }}
+        .finding-action {{ border-left-color: {_CLR_ACCENT}; }}
+        .findings-subsection {{ margin-bottom: 1rem; }}
+        .findings-subsection h3 {{
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: var(--lool-slate);
+            margin-bottom: 0.5rem;
+        }}
+        @media print {{
+            body {{ background: #fff; padding: 0; }}
+            .chart-section {{ break-inside: avoid; border: 1px solid #ccc; }}
+            header {{ border-bottom-color: #000; }}
+            header h1 {{ color: #000; }}
+            .collapsible-content {{ display: block !important; }}
+            .collapsible-toggle .chevron {{ display: none; }}
+            [data-tooltip] {{ cursor: default; }}
+        }}
+    """
+
+
+# ---------------------------------------------------------------------------
+# Inline JS
+# ---------------------------------------------------------------------------
+
+
+def _tooltip_js() -> str:
+    """Return inline JS for hover tooltips on elements with data-tooltip attribute."""
+    return (
+        "<script>\n"
+        "document.addEventListener('DOMContentLoaded', function() {\n"
+        "    var tip = document.createElement('div');\n"
+        "    tip.style.cssText = 'position:fixed;padding:8px 12px;background:#374B65;color:#fff;'\n"
+        "        + 'border-radius:4px;font-size:12px;max-width:300px;pointer-events:none;'\n"
+        "        + 'z-index:1000;display:none;line-height:1.4;white-space:pre-line;'\n"
+        "        + 'box-shadow:0 2px 8px rgba(0,0,0,0.15)';\n"
+        "    document.body.appendChild(tip);\n"
+        "    document.addEventListener('mouseover', function(e) {\n"
+        "        var el = e.target.closest('[data-tooltip]');\n"
+        "        if (el) {\n"
+        "            tip.textContent = el.getAttribute('data-tooltip');\n"
+        "            tip.style.display = 'block';\n"
+        "        }\n"
+        "    });\n"
+        "    document.addEventListener('mousemove', function(e) {\n"
+        "        if (tip.style.display === 'block') {\n"
+        "            tip.style.left = Math.min(e.clientX + 12, window.innerWidth - 320) + 'px';\n"
+        "            tip.style.top = (e.clientY + 16) + 'px';\n"
+        "        }\n"
+        "    });\n"
+        "    document.addEventListener('mouseout', function(e) {\n"
+        "        if (e.target.closest('[data-tooltip]')) tip.style.display = 'none';\n"
+        "    });\n"
+        "});\n"
+        "</script>"
+    )
+
+
+def _collapsible_js() -> str:
+    """Return inline JS for collapsible sections."""
+    return (
+        "<script>\n"
+        "document.addEventListener('DOMContentLoaded', function() {\n"
+        "    document.querySelectorAll('.collapsible-toggle').forEach(function(btn) {\n"
+        "        btn.addEventListener('click', function() {\n"
+        "            var content = this.nextElementSibling;\n"
+        "            var chevron = this.querySelector('.chevron');\n"
+        "            if (content.style.display === 'none') {\n"
+        "                content.style.display = 'block';\n"
+        "                if (chevron) chevron.style.transform = 'rotate(90deg)';\n"
+        "            } else {\n"
+        "                content.style.display = 'none';\n"
+        "                if (chevron) chevron.style.transform = 'rotate(0deg)';\n"
+        "            }\n"
+        "        });\n"
+        "    });\n"
+        "});\n"
+        "</script>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Key Findings
+# ---------------------------------------------------------------------------
+
+
+def _key_findings(
+    checklist: dict[str, Any] | None,
+    reviews: dict[str, Any] | None,
+) -> str:
+    """Build actionable Key Findings section from checklist and slide reviews."""
+    strong: list[str] = []
+    attention: list[str] = []
+    actions: list[str] = []
+
+    if _usable(checklist):
+        summary = _as_dict(checklist.get("summary"))
+        by_category = _as_dict(summary.get("by_category"))
+        items = _as_list(checklist.get("items"))
+
+        # Strong categories (>= 80% pass rate). A gated category is skipped: "1/1 criteria
+        # pass" is true of the arithmetic and false of the deck, and calling it a STRENGTH is
+        # the worst reading of the two.
+        gated_cats = _gated_categories(checklist)
+        for cat in _ordered_categories(by_category):
+            if cat in gated_cats:
+                continue
+            counts = _as_dict(by_category.get(cat))
+            p = _num(counts.get("pass", 0))
+            f = _num(counts.get("fail", 0))
+            w = _num(counts.get("warn", 0))
+            total = p + f + w
+            if total > 0 and p / total >= 0.8:
+                strong.append(f"{cat}: {int(p)}/{int(total)} criteria pass")
+
+        # Failed items, then warned ones. Warnings are included because the markdown
+        # report lists them once failures run out — omitting them here produced a deck
+        # with markdown actions and an empty HTML actions list.
+        for wanted in ("fail", "warn"):
+            for item in items:
+                if not isinstance(item, dict) or item.get("status") != wanted:
+                    continue
+                label = str(item.get("label", item.get("id", "")))
+                # The FINDING is the diagnosis (evidence); the ACTION is the fix (notes).
+                # Deliberately not `notes or evidence` in both — that printed the same
+                # string twice in adjacent sections.
+                evidence = str(item.get("evidence") or "")
+                attention.append(f"{label}: {evidence}" if evidence else label)
+                # Shared predicate, not a local copy: compose_report.py suppresses the
+                # same strings, and a duplicated check drifts invisibly — one delivered
+                # artifact would hide a bad note while the other rendered it.
+                fix = _notes.usable_fix(item.get("notes"))
+                if fix is not None:
+                    actions.append(f"{label}: {fix}")
+
+    # Slide review findings. INSERTED AT THE FRONT, not appended: the lists are
+    # truncated to 3 at render time and failures are already in them, so on a real deck
+    # (12-18 failures measured) an appended missing slide was dead code — never rendered.
+    # A critical missing slide also genuinely outranks a failed criterion.
+    if _usable(reviews):
+        missing = _as_list(reviews.get("missing_slides"))
+        ms_attention: list[str] = []
+        ms_actions: list[str] = []
+        critical: list[int] = []
+        for ms in missing[:3]:
+            if isinstance(ms, dict):
+                expected = str(ms.get("expected_type", ""))
+                label = _humanize_framework(expected) if expected else "Unknown"
+                importance = str(ms.get("importance", ""))
+                # Match the markdown section: only a CRITICAL slide with a real
+                # recommendation earns a slot. Without both filters the two artifacts
+                # disagree — HTML showed an `important` slide markdown omitted, and
+                # emitted a bare "Add a <X> slide" (the finding restated) when the
+                # recommendation was empty.
+                rec = str(ms.get("recommendation", "")).strip()
+                if importance != "critical" or not rec:
+                    continue
+                ms_attention.append(f"Missing: {label} ({importance})")
+                ms_actions.append(f"Add a {label} slide: {rec}")
+                # Index into the PARALLEL list, recorded while building it. Enumerating
+                # `missing` instead desyncs the moment an entry is skipped, and the
+                # isinstance guard above then only looks like it protects this.
+                critical.append(len(ms_attention) - 1)
+        if critical:
+            # Reserve the lead slot for one critical omission; the rest queue behind.
+            k = critical[0]
+            attention.insert(0, ms_attention[k])
+            actions.insert(0, ms_actions[k])
+            ms_attention.pop(k)
+            ms_actions.pop(k)
+        attention.extend(ms_attention)
+        actions.extend(ms_actions)
+
+    if not strong and not attention and not actions:
+        return ""
+
+    def _render_items(items: list[str], css_class: str, max_items: int = 3) -> str:
+        return "".join(f'<div class="finding-item {css_class}">{_esc(item)}</div>' for item in items[:max_items])
+
+    parts: list[str] = []
+    if strong:
+        parts.append(
+            f'<div class="findings-subsection"><h3>What\'s strong</h3>{_render_items(strong, "finding-strong")}</div>'
+        )
+    if attention:
+        parts.append(
+            '<div class="findings-subsection">'
+            "<h3>What needs attention</h3>"
+            f"{_render_items(attention, 'finding-attention')}"
+            "</div>"
+        )
+    if actions:
+        parts.append(
+            f'<div class="findings-subsection"><h3>Top actions</h3>{_render_items(actions, "finding-action")}</div>'
+        )
+
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Chart 1: Score Gauge (semi-circle)
+# ---------------------------------------------------------------------------
+
+
+def _chart_score_gauge(checklist: dict[str, Any] | None) -> str:
+    """Render a semi-circle score gauge SVG.
+
+    Uses stroked zone arcs inside an annular-semicircle clipPath drawn at
+    exact ranges (the clipPath hides endpoint artifacts at the baseline).
+    The score is indicated by a needle, not an arc.
+    """
+    if checklist is None:
+        return _placeholder("No data available")
+    if checklist is _CORRUPT:
+        return _placeholder("Data unavailable")
+    if _is_stub(checklist):
+        reason = _esc(checklist.get("reason", "Skipped"))
+        return _placeholder(f"Skipped: {reason}")
+
+    summary = _as_dict(checklist.get("summary"))
+    score_pct = _num(summary.get("score_pct"), 0.0)
+    raw_status = str(summary.get("overall_status", "unknown")).strip()
+    overall_status = _esc(raw_status.replace("_", " ").title())
+
+    # Clamp score to 0-100
+    score_pct = max(0.0, min(100.0, score_pct))
+
+    # SVG dimensions
+    w, h = 300, 180
+    cx, cy = _num(w / 2), _num(h - 20)
+    r = _num(110)
+    band_w = 18
+    outer_r = _num(r + band_w / 2)  # 119
+    inner_r = _num(r - band_w / 2)  # 101
+
+    def _angle(pct: float) -> float:
+        """Convert percentage to angle (radians). 0%=pi, 100%=0."""
+        return math.pi * (1 - _num(pct) / 100.0)
+
+    def _arc_path(start_pct: float, end_pct: float) -> str:
+        """SVG arc path along the centre radius."""
+        a1, a2 = _angle(start_pct), _angle(end_pct)
+        x1 = _num(cx + r * math.cos(a1))
+        y1 = _num(cy - r * math.sin(a1))
+        x2 = _num(cx + r * math.cos(a2))
+        y2 = _num(cy - r * math.sin(a2))
+        large = 1 if abs(end_pct - start_pct) > 50 else 0
+        return f"M {x1:.2f} {y1:.2f} A {r:.2f} {r:.2f} 0 {large} 1 {x2:.2f} {y2:.2f}"
+
+    # ClipPath: annular semicircle — the exact visible gauge shape
+    clip = (
+        f'<defs><clipPath id="gc">'
+        f'<path d="M {_num(cx - outer_r):.2f} {cy:.2f} '
+        f"A {outer_r:.2f} {outer_r:.2f} 0 1 1 "
+        f"{_num(cx + outer_r):.2f} {cy:.2f} "
+        f"L {_num(cx + inner_r):.2f} {cy:.2f} "
+        f"A {inner_r:.2f} {inner_r:.2f} 0 1 0 "
+        f'{_num(cx - inner_r):.2f} {cy:.2f} Z"/>'
+        f"</clipPath></defs>"
+    )
+
+    # Zone arcs — exact ranges, clipPath handles baseline edges
+    # Derived from the band thresholds, never re-typed. These were literals, so a
+    # threshold change elsewhere would have painted the needle in a zone that
+    # contradicted the caption printed beside it.
+    _e = _thresholds.zone_edges()
+    zones = [
+        (_e[0], _e[1], _COLOR_FAIL),
+        (_e[1], _e[2], _COLOR_WARN),
+        (_e[2], _e[3], "#71B48D"),
+        (_e[3], _e[4], _COLOR_PASS),
+    ]
+    arcs = []
+    for z_start, z_end, color in zones:
+        arcs.append(
+            f'<path d="{_esc(_arc_path(z_start, z_end))}" fill="none" '
+            f'stroke="{_esc(color)}" stroke-width="{band_w}" '
+            f'opacity="0.25"/>'
+        )
+
+    # Needle
+    needle_angle = _angle(score_pct)
+    nx = _num(cx + (inner_r - 20) * math.cos(needle_angle))
+    ny = _num(cy - (inner_r - 20) * math.sin(needle_angle))
+    needle = (
+        f'<line x1="{cx:.2f}" y1="{cy:.2f}" x2="{nx:.2f}" y2="{ny:.2f}" '
+        f'stroke="{_esc(_COLOR_PRIMARY)}" stroke-width="3" '
+        f'stroke-linecap="round"/>'
+        f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="5" '
+        f'fill="{_esc(_COLOR_PRIMARY)}"/>'
+    )
+
+    # Score text
+    score_text = (
+        f'<text x="{cx:.2f}" y="{_num(cy - 30):.2f}" '
+        f'text-anchor="middle" font-size="28" font-weight="700" '
+        f'fill="#374B65">{_esc(f"{score_pct:.0f}")}%</text>'
+        f'<text x="{cx:.2f}" y="{_num(cy - 8):.2f}" '
+        f'text-anchor="middle" font-size="13" '
+        f'fill="#7D90A3">{overall_status}</text>'
+    )
+
+    # Threshold labels
+    labels = ""
+    label_r = _num(outer_r + 12)
+    for pct, label in [(e, f"{e:g}") for e in _thresholds.zone_edges()]:
+        a = _angle(pct)
+        lx = _num(cx + label_r * math.cos(a))
+        ly = _num(cy - label_r * math.sin(a))
+        labels += (
+            f'<text x="{lx:.2f}" y="{ly:.2f}" text-anchor="middle" font-size="9" fill="#A6AEB5">{_esc(label)}</text>'
+        )
+
+    clipped = f'{clip}<g clip-path="url(#gc)">{"".join(arcs)}</g>'
+
+    svg = (
+        f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
+        f'width="{w}" height="{h}">'
+        f"{clipped}"
+        f"{needle}"
+        f"{score_text}"
+        f"{labels}"
+        f"</svg>"
+    )
+    return f'<div class="chart-container">{svg}</div>'
+
+
+# ---------------------------------------------------------------------------
+# Chart 2: Category Radar Chart (7-point spider)
+# ---------------------------------------------------------------------------
+
+
+def _chart_radar(checklist: dict[str, Any] | None) -> str:
+    """Render a 7-point radar/spider chart SVG."""
+    if checklist is None:
+        return _placeholder("No data available")
+    if checklist is _CORRUPT:
+        return _placeholder("Data unavailable")
+    if _is_stub(checklist):
+        reason = _esc(checklist.get("reason", "Skipped"))
+        return _placeholder(f"Skipped: {reason}")
+
+    summary = _as_dict(checklist.get("summary"))
+    by_category = _as_dict(summary.get("by_category"))
+
+    if not by_category:
+        return _placeholder("No category data available")
+
+    # Drop any category the design gate touched BEFORE measuring anything: the pass rate below
+    # divides by pass+fail+warn, so a category with four gated criteria and one survivor plots
+    # at 100% on the outer ring and prints "100%" as its label. There is no honest vertex for
+    # "nobody could see this", so the category leaves the chart and the disclosure carries it.
+    # The stacked breakdown below is deliberately NOT changed -- it divides by a total that
+    # INCLUDES not_applicable and draws the N/A band, so it already tells the truth.
+    gated_cats = _gated_categories(checklist)
+    categories = [c for c in _ordered_categories(by_category) if c not in gated_cats]
+    n = len(categories)
+    if n == 0:
+        return _placeholder("No category data available")
+
+    # Compute pass rates
+    pass_rates: list[float] = []
+    for cat in categories:
+        counts = _as_dict(by_category.get(cat))
+        p = _num(counts.get("pass"), 0)
+        f = _num(counts.get("fail"), 0)
+        w = _num(counts.get("warn"), 0)
+        denom = p + f + w
+        if denom > 0:
+            pass_rates.append(_num((p / denom) * 100.0))
+        else:
+            pass_rates.append(0.0)
+
+    # SVG dimensions — wide viewBox to avoid label clipping
+    vw, vh = 460, 360
+    cx = _num(vw / 2)
+    cy = _num(vh / 2)
+    max_r = _num(100)
+
+    # Build grid rings (25%, 50%, 75%, 100%)
+    grid_lines = ""
+    for pct in [25, 50, 75, 100]:
+        ring_r = _num(max_r * pct / 100)
+        points_str = ""
+        for i in range(n):
+            angle = _num(2 * math.pi * i / n - math.pi / 2)
+            px = _num(cx + ring_r * math.cos(angle))
+            py = _num(cy + ring_r * math.sin(angle))
+            points_str += f"{px:.2f},{py:.2f} "
+        grid_lines += f'<polygon points="{_esc(points_str.strip())}" fill="none" stroke="#D7DBE0" stroke-width="1"/>'
+
+    # Axis lines
+    axis_lines = ""
+    for i in range(n):
+        angle = _num(2 * math.pi * i / n - math.pi / 2)
+        ax = _num(cx + max_r * math.cos(angle))
+        ay = _num(cy + max_r * math.sin(angle))
+        axis_lines += (
+            f'<line x1="{cx:.2f}" y1="{cy:.2f}" x2="{ax:.2f}" y2="{ay:.2f}" stroke="#D7DBE0" stroke-width="1"/>'
+        )
+
+    # Data polygon
+    data_points_str = ""
+    for i in range(n):
+        angle = _num(2 * math.pi * i / n - math.pi / 2)
+        dr = _num(max_r * pass_rates[i] / 100.0)
+        dx = _num(cx + dr * math.cos(angle))
+        dy = _num(cy + dr * math.sin(angle))
+        data_points_str += f"{dx:.2f},{dy:.2f} "
+
+    data_polygon = (
+        f'<polygon points="{_esc(data_points_str.strip())}" '
+        f'fill="{_esc(_COLOR_PRIMARY)}" fill-opacity="0.25" '
+        f'stroke="{_esc(_COLOR_PRIMARY)}" stroke-width="2"/>'
+    )
+
+    # Data points (dots)
+    data_dots = ""
+    for i in range(n):
+        angle = _num(2 * math.pi * i / n - math.pi / 2)
+        dr = _num(max_r * pass_rates[i] / 100.0)
+        dx = _num(cx + dr * math.cos(angle))
+        dy = _num(cy + dr * math.sin(angle))
+        data_dots += f'<circle cx="{dx:.2f}" cy="{dy:.2f}" r="4" fill="{_esc(_COLOR_PRIMARY)}"/>'
+
+    # Category labels
+    labels = ""
+    for i in range(n):
+        angle = _num(2 * math.pi * i / n - math.pi / 2)
+        label_r = _num(max_r + 24)
+        lx = _num(cx + label_r * math.cos(angle))
+        ly = _num(cy + label_r * math.sin(angle))
+        anchor = "middle"
+        if abs(math.cos(angle)) > 0.3:
+            anchor = "start" if math.cos(angle) > 0 else "end"
+        rate_str = f"{pass_rates[i]:.0f}%"
+        labels += (
+            f'<text x="{lx:.2f}" y="{ly:.2f}" text-anchor="{_esc(anchor)}" '
+            f'font-size="10" fill="#7D90A3">'
+            f"{_esc(categories[i])}</text>"
+            f'<text x="{lx:.2f}" y="{_num(ly + 13):.2f}" text-anchor="{_esc(anchor)}" '
+            f'font-size="9" fill="#A6AEB5">{_esc(rate_str)}</text>'
+        )
+
+    svg = (
+        f'<svg viewBox="0 0 {vw} {vh}" xmlns="http://www.w3.org/2000/svg" '
+        f'width="{vw}" height="{vh}">'
+        f"{grid_lines}"
+        f"{axis_lines}"
+        f"{data_polygon}"
+        f"{data_dots}"
+        f"{labels}"
+        f"</svg>"
+    )
+    return f'<div class="chart-container">{svg}</div>'
+
+
+# ---------------------------------------------------------------------------
+# Chart 3: Category Breakdown (horizontal stacked bars)
+# ---------------------------------------------------------------------------
+
+
+def _chart_category_breakdown(checklist: dict[str, Any] | None) -> str:
+    """Render horizontal stacked bars for category breakdown."""
+    if checklist is None:
+        return _placeholder("No data available")
+    if checklist is _CORRUPT:
+        return _placeholder("Data unavailable")
+    if _is_stub(checklist):
+        reason = _esc(checklist.get("reason", "Skipped"))
+        return _placeholder(f"Skipped: {reason}")
+
+    summary = _as_dict(checklist.get("summary"))
+    by_category = _as_dict(summary.get("by_category"))
+
+    if not by_category:
+        return _placeholder("No category data available")
+
+    categories = _ordered_categories(by_category)
+    n = len(categories)
+    if n == 0:
+        return _placeholder("No category data available")
+
+    # SVG dimensions
+    label_width = 150
+    bar_width = 400
+    bar_height = 24
+    gap = 8
+    padding_top = 10
+    total_width = label_width + bar_width + 20
+    total_height = _num(padding_top + n * (bar_height + gap) + 40)
+
+    bars_svg = ""
+    for idx, cat in enumerate(categories):
+        counts = _as_dict(by_category.get(cat))
+        p = _num(counts.get("pass"), 0)
+        f = _num(counts.get("fail"), 0)
+        w = _num(counts.get("warn"), 0)
+        na = _num(counts.get("not_applicable"), 0)
+        total = p + f + w + na
+
+        y = _num(padding_top + idx * (bar_height + gap))
+
+        # Label
+        bars_svg += (
+            f'<text x="{_num(label_width - 8):.2f}" y="{_num(y + bar_height / 2 + 4):.2f}" '
+            f'text-anchor="end" font-size="11" fill="#7D90A3">{_esc(cat)}</text>'
+        )
+
+        if total <= 0:
+            # Empty bar
+            bars_svg += (
+                f'<rect x="{_num(label_width):.2f}" y="{y:.2f}" '
+                f'width="{_num(bar_width):.2f}" height="{_num(bar_height):.2f}" '
+                f'rx="4" fill="#F1F4F4"/>'
+            )
+            continue
+
+        # Background
+        bars_svg += (
+            f'<rect x="{_num(label_width):.2f}" y="{y:.2f}" '
+            f'width="{_num(bar_width):.2f}" height="{_num(bar_height):.2f}" '
+            f'rx="4" fill="#F1F4F4"/>'
+        )
+
+        # Stacked segments: pass, warn, fail, NA
+        segments = [
+            (p, _COLOR_PASS),
+            (w, _COLOR_WARN),
+            (f, _COLOR_FAIL),
+            (na, _COLOR_NA),
+        ]
+        x_offset = _num(label_width)
+        for seg_val, seg_color in segments:
+            if seg_val <= 0:
+                continue
+            seg_width = _num(bar_width * seg_val / total)
+            bars_svg += (
+                f'<rect x="{x_offset:.2f}" y="{y:.2f}" '
+                f'width="{seg_width:.2f}" height="{_num(bar_height):.2f}" '
+                f'fill="{_esc(seg_color)}"/>'
+            )
+            x_offset = _num(x_offset + seg_width)
+
+    # Legend
+    legend_y = _num(padding_top + n * (bar_height + gap) + 10)
+    legend_items = [
+        ("Pass", _COLOR_PASS),
+        ("Warn", _COLOR_WARN),
+        ("Fail", _COLOR_FAIL),
+        ("N/A", _COLOR_NA),
+    ]
+    lx = _num(label_width)
+    legend_svg = ""
+    for label, color in legend_items:
+        legend_svg += (
+            f'<rect x="{lx:.2f}" y="{legend_y:.2f}" width="12" height="12" rx="2" '
+            f'fill="{_esc(color)}"/>'
+            f'<text x="{_num(lx + 16):.2f}" y="{_num(legend_y + 10):.2f}" '
+            f'font-size="10" fill="#7D90A3">{_esc(label)}</text>'
+        )
+        lx = _num(lx + 60)
+
+    svg = (
+        f'<svg viewBox="0 0 {total_width} {total_height}" xmlns="http://www.w3.org/2000/svg" '
+        f'width="{total_width}" height="{total_height:.0f}">'
+        f"{bars_svg}"
+        f"{legend_svg}"
+        f"</svg>"
+    )
+    return f'<div class="chart-container">{svg}</div>'
+
+
+# ---------------------------------------------------------------------------
+# Chart 4: Slide Map (diverging bar chart)
+# ---------------------------------------------------------------------------
+
+
+def _chart_slide_map(
+    reviews: dict[str, Any] | None,
+    inventory: dict[str, Any] | None = None,
+    stage_profile: dict[str, Any] | None = None,
+) -> str:
+    """Render a diverging bar chart — strengths extend right, weaknesses extend left."""
+    if reviews is None:
+        return _placeholder("No data available")
+    if reviews is _CORRUPT:
+        return _placeholder("Data unavailable")
+    if _is_stub(reviews):
+        reason = _esc(reviews.get("reason", "Skipped"))
+        return _placeholder(f"Skipped: {reason}")
+
+    review_list = _as_list(reviews.get("reviews"))
+    if not review_list:
+        return _placeholder("No slide reviews available")
+
+    # Build slide data indexed by slide number (keep first occurrence)
+    slide_data: dict[int, dict[str, Any]] = {}
+    for review in review_list:
+        if not isinstance(review, dict):
+            continue
+        num = int(_num(review.get("slide_number"), 0))
+        if num <= 0:
+            continue
+        if num not in slide_data:
+            slide_data[num] = {
+                "strengths": len(_as_list(review.get("strengths"))),
+                "weaknesses": len(_as_list(review.get("weaknesses"))),
+                "recommendations": len(_as_list(review.get("recommendations"))),
+                "maps_to": str(review.get("maps_to", "")),
+            }
+
+    if not slide_data:
+        return _placeholder("No slide data available")
+
+    # Build missing slides list
+    missing_slides: list[dict[str, str]] = []
+    for ms in _as_list(reviews.get("missing_slides")):
+        if isinstance(ms, dict) and ms.get("expected_type"):
+            missing_slides.append(
+                {
+                    "expected_type": str(ms["expected_type"]),
+                    "importance": str(ms.get("importance", "")),
+                }
+            )
+
+    # Build ordered row list: interleave present slides and missing slides
+    # using expected_framework ordering when available
+    rows: list[dict[str, Any]] = []
+
+    expected_framework = _as_list(_as_dict(stage_profile).get("expected_framework")) if _usable(stage_profile) else []
+
+    if expected_framework:
+        slides_by_type: dict[str, list[int]] = {}
+        for num, info in sorted(slide_data.items()):
+            mt = info["maps_to"]
+            slides_by_type.setdefault(mt, []).append(num)
+
+        missing_types = {ms["expected_type"] for ms in missing_slides}
+        missing_by_type = {ms["expected_type"]: ms for ms in missing_slides}
+        placed_slides: set[int] = set()
+
+        for framework_type in expected_framework:
+            if framework_type in slides_by_type:
+                for num in slides_by_type[framework_type]:
+                    rows.append({"type": "present", "num": num, **slide_data[num]})
+                    placed_slides.add(num)
+            elif framework_type in missing_types:
+                ms = missing_by_type[framework_type]
+                rows.append(
+                    {
+                        "type": "missing",
+                        "expected_type": ms["expected_type"],
+                        "importance": ms["importance"],
+                    }
+                )
+
+        for num in sorted(slide_data.keys()):
+            if num not in placed_slides:
+                rows.append({"type": "present", "num": num, **slide_data[num]})
+
+        placed_missing = {r.get("expected_type") for r in rows if r["type"] == "missing"}
+        for ms in missing_slides:
+            if ms["expected_type"] not in placed_missing:
+                rows.append(
+                    {
+                        "type": "missing",
+                        "expected_type": ms["expected_type"],
+                        "importance": ms["importance"],
+                    }
+                )
+    else:
+        for num in sorted(slide_data.keys()):
+            rows.append({"type": "present", "num": num, **slide_data[num]})
+        for ms in missing_slides:
+            rows.append(
+                {
+                    "type": "missing",
+                    "expected_type": ms["expected_type"],
+                    "importance": ms["importance"],
+                }
+            )
+
+    if not rows:
+        return _placeholder("No slide data available")
+
+    # Compute bar scaling
+    max_count = 1
+    for row in rows:
+        if row["type"] == "present":
+            max_count = max(max_count, row["strengths"], row["weaknesses"])
+
+    # SVG dimensions
+    label_w = 180
+    bar_area_w = 400
+    rec_w = 70
+    row_h = 32
+    row_gap = 4
+    padding_top = 10
+    padding_bottom = 40
+    center_x = _num(label_w + bar_area_w / 2)
+    half_bar = _num(bar_area_w / 2)
+    total_w = label_w + bar_area_w + rec_w
+    total_h = _num(padding_top + len(rows) * (row_h + row_gap) + padding_bottom)
+    min_bar_for_inner_label = 30  # px — labels go inside bar when wide enough
+
+    svg_parts: list[str] = []
+
+    # Center axis line
+    svg_parts.append(
+        f'<line x1="{center_x:.1f}" y1="{padding_top}" '
+        f'x2="{center_x:.1f}" y2="{_num(total_h - padding_bottom):.1f}" '
+        f'stroke="#D7DBE0" stroke-width="1"/>'
+    )
+
+    for idx, row in enumerate(rows):
+        y = _num(padding_top + idx * (row_h + row_gap))
+        mid_y = _num(y + row_h / 2)
+        text_y = _num(mid_y + 4)
+
+        # Zebra striping
+        if idx % 2 == 1:
+            svg_parts.append(
+                f'<rect x="0" y="{y:.1f}" width="{total_w}" height="{row_h}" fill="#F1F4F4" fill-opacity="0.5" rx="4"/>'
+            )
+
+        if row["type"] == "present":
+            num = row["num"]
+            maps_to = row.get("maps_to", "")
+            label = _humanize_framework(maps_to) if maps_to else ""
+            s_count = row["strengths"]
+            w_count = row["weaknesses"]
+            r_count = row["recommendations"]
+
+            label_text = f"{num}"
+            if label:
+                label_text += f" \u00b7 {label}"
+            svg_parts.append(
+                f'<text x="{_num(label_w - 8):.1f}" y="{text_y:.1f}" '
+                f'text-anchor="end" font-size="11" fill="#7D90A3">'
+                f"{_esc(label_text)}</text>"
+            )
+
+            if s_count > 0:
+                bar_w = _num(half_bar * s_count / max_count)
+                svg_parts.append(
+                    f'<rect x="{center_x:.1f}" y="{_num(y + 4):.1f}" '
+                    f'width="{bar_w:.1f}" height="{_num(row_h - 8):.1f}" '
+                    f'rx="3" fill="{_esc(_COLOR_PASS)}"/>'
+                )
+                if bar_w >= min_bar_for_inner_label:
+                    # Label inside bar (white text, right-aligned within bar)
+                    svg_parts.append(
+                        f'<text x="{_num(center_x + bar_w - 6):.1f}" y="{text_y:.1f}" '
+                        f'text-anchor="end" font-size="10" fill="#fff" '
+                        f'font-weight="600">{s_count}</text>'
+                    )
+                else:
+                    # Label outside bar (colored text)
+                    svg_parts.append(
+                        f'<text x="{_num(center_x + bar_w + 4):.1f}" y="{text_y:.1f}" '
+                        f'font-size="10" fill="{_esc(_COLOR_PASS)}" '
+                        f'font-weight="600">{s_count}</text>'
+                    )
+
+            if w_count > 0:
+                bar_w = _num(half_bar * w_count / max_count)
+                svg_parts.append(
+                    f'<rect x="{_num(center_x - bar_w):.1f}" y="{_num(y + 4):.1f}" '
+                    f'width="{bar_w:.1f}" height="{_num(row_h - 8):.1f}" '
+                    f'rx="3" fill="{_esc(_COLOR_FAIL)}"/>'
+                )
+                if bar_w >= min_bar_for_inner_label:
+                    # Label inside bar (white text, left-aligned within bar)
+                    svg_parts.append(
+                        f'<text x="{_num(center_x - bar_w + 6):.1f}" y="{text_y:.1f}" '
+                        f'font-size="10" fill="#fff" '
+                        f'font-weight="600">{w_count}</text>'
+                    )
+                else:
+                    # Label outside bar (colored text)
+                    svg_parts.append(
+                        f'<text x="{_num(center_x - bar_w - 4):.1f}" y="{text_y:.1f}" '
+                        f'text-anchor="end" font-size="10" fill="{_esc(_COLOR_FAIL)}" '
+                        f'font-weight="600">{w_count}</text>'
+                    )
+
+            if r_count > 0:
+                rec_x = _num(label_w + bar_area_w + 14)
+                svg_parts.append(
+                    f'<text x="{rec_x:.1f}" y="{text_y:.1f}" '
+                    f'font-size="10" fill="#A6AEB5">'
+                    f"{r_count} rec{'s' if r_count != 1 else ''}</text>"
+                )
+
+        elif row["type"] == "missing":
+            expected_type = row.get("expected_type", "")
+            importance = row.get("importance", "")
+            label = _humanize_framework(expected_type) if expected_type else "Unknown"
+
+            svg_parts.append(
+                f'<text x="{_num(label_w - 8):.1f}" y="{text_y:.1f}" '
+                f'text-anchor="end" font-size="11" fill="#7D90A3">'
+                f"\u2014 \u00b7 {_esc(label)}</text>"
+            )
+
+            svg_parts.append(
+                f'<line x1="{label_w}" y1="{mid_y:.1f}" '
+                f'x2="{_num(label_w + bar_area_w):.1f}" y2="{mid_y:.1f}" '
+                f'stroke="#A6AEB5" stroke-width="1" stroke-dasharray="6,4"/>'
+            )
+
+            if importance:
+                badge_label = importance.replace("_", " ")
+                rec_x = _num(label_w + bar_area_w + 14)
+                svg_parts.append(
+                    f'<text x="{rec_x:.1f}" y="{text_y:.1f}" '
+                    f'font-size="9" fill="#7D90A3" font-style="italic">'
+                    f"{_esc(badge_label)}</text>"
+                )
+
+    # Legend
+    legend_y = _num(total_h - padding_bottom + 16)
+    legend_items: list[tuple[str, str, str]] = [
+        (_COLOR_PASS, "rect", "Strengths"),
+        (_COLOR_FAIL, "rect", "Weaknesses"),
+        ("#A6AEB5", "dash", "Missing expected slide"),
+    ]
+    lx = _num(label_w)
+    legend_svg = ""
+    for color, shape, label in legend_items:
+        if shape == "rect":
+            legend_svg += (
+                f'<rect x="{lx:.1f}" y="{_num(legend_y - 8):.1f}" width="12" height="12" rx="2" fill="{_esc(color)}"/>'
+            )
+        else:
+            legend_svg += (
+                f'<line x1="{lx:.1f}" y1="{_num(legend_y - 2):.1f}" '
+                f'x2="{_num(lx + 12):.1f}" y2="{_num(legend_y - 2):.1f}" '
+                f'stroke="{_esc(color)}" stroke-width="2" stroke-dasharray="4,3"/>'
+            )
+        legend_svg += (
+            f'<text x="{_num(lx + 16):.1f}" y="{legend_y:.1f}" font-size="10" fill="#7D90A3">{_esc(label)}</text>'
+        )
+        lx = _num(lx + len(label) * 7 + 32)
+
+    svg = (
+        f'<svg viewBox="0 0 {total_w} {total_h:.0f}" '
+        f'xmlns="http://www.w3.org/2000/svg" '
+        f'width="{total_w}" height="{total_h:.0f}">'
+        f"{''.join(svg_parts)}"
+        f"{legend_svg}"
+        f"</svg>"
+    )
+    return f'<div class="chart-container">{svg}</div>'
+
+
+# ---------------------------------------------------------------------------
+# HTML composition
+# ---------------------------------------------------------------------------
+
+
+def _numbers_section(reconciliation: dict[str, Any] | None) -> str:
+    """The numeric-reconciliation findings, for the page the founder actually opens.
+
+    `report.md` and `report.html` are two renderers over one artifact set, and a finding
+    present in one and absent from the other is a delivery defect this fleet has shipped
+    before — which is why `visualize.py` carries its own required-artifact list rather
+    than inheriting compose's.
+
+    Reads `relations` and nothing else, for the same reason compose does: `select()` is
+    the only thing entitled to decide what a founder sees.
+    """
+    if not _usable(reconciliation):
+        return ""
+    relations = [_as_dict(r) for r in _as_list(reconciliation.get("relations"))]
+    # VERDICT, not `kind` — see the note in compose_report._section_numbers. The two
+    # renderers must agree, and `kind` is the model's proposal, not the engine's finding.
+    contradictions = [r for r in relations if r.get("verdict") == "contradiction"]
+    derived = [r for r in relations if r.get("verdict") == "derived"]
+    if not contradictions and not derived:
+        return ""
+
+    parts: list[str] = []
+    if contradictions:
+        rows = "".join(f'<li class="finding-fail">{_esc(r.get("rendered", ""))}</li>' for r in contradictions)
+        parts.append(f"<h3>Figures that disagree</h3><ul>{rows}</ul>")
+    if derived:
+        rows = "".join(f'<li class="finding-warn">{_esc(r.get("rendered", ""))}</li>' for r in derived)
+        parts.append(
+            "<h3>What the numbers imply</h3>"
+            "<p>Readings, not errors — the arithmetic is exact, the interpretation is a "
+            "judgement call, and an investor may well make it.</p>"
+            f"<ul>{rows}</ul>"
+        )
+    return '<div class="chart-section"><h2>What Your Numbers Say About Each Other</h2>' + "".join(parts) + "</div>"
+
+
+def compose_html(dir_path: str) -> str:
+    """Load artifacts and compose complete HTML report."""
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import _theme
+
+    brand_css = _theme.brand_css()
+
+    artifacts: dict[str, dict[str, Any] | None] = {}
+    for name in REQUIRED_ARTIFACTS:
+        artifacts[name] = _load_artifact(dir_path, name)
+
+    inventory = artifacts.get("deck_inventory.json")
+    checklist = artifacts.get("checklist.json")
+    reviews = artifacts.get("slide_reviews.json")
+
+    # Company name for title
+    company_name = "Unknown Company"
+    if _usable(inventory):
+        company_name = str(inventory.get("company_name", "Unknown Company"))
+
+    # Build header
+    header_parts = [f"<h1>Deck Review: {_esc(company_name)}</h1>"]
+    if _usable(inventory):
+        date = _esc(inventory.get("review_date", ""))
+        total_slides = _esc(str(inventory.get("total_slides", "?")))
+        fmt = _esc(inventory.get("input_format", ""))
+        header_parts.append(f'<div class="subtitle">{date} | {total_slides} slides | {fmt}</div>')
+
+    header_parts.append(
+        '<div class="subtitle">Generated by '
+        '<a href="https://github.com/lool-ventures/founder-skills">founder skills</a>'
+        ' by <a href="https://lool.vc">lool ventures</a>'
+        " — Deck Review Agent</div>"
+    )
+    header_parts.append(
+        '<div class="subtitle" style="font-style:italic;margin-top:0.5rem;">'
+        "Scores and assessments are agent-generated against best-practice frameworks</div>"
+    )
+
+    header = "<header>" + "".join(header_parts) + "</header>"
+
+    # Build chart sections
+    gauge_section = f'<div class="chart-section"><h2>Deck-craft score</h2>{_chart_score_gauge(checklist)}</div>'
+
+    # Key Findings section
+    findings_html = _key_findings(checklist, reviews)
+    findings_section = ""
+    if findings_html:
+        findings_section = f'<div class="chart-section"><h2>Key Findings</h2>{findings_html}</div>'
+
+    radar_section = f'<div class="chart-section"><h2>Category Radar</h2>{_chart_radar(checklist)}</div>'
+
+    breakdown_section = (
+        f'<div class="chart-section"><h2>Category Breakdown</h2>{_chart_category_breakdown(checklist)}'
+        f"{_design_gate_note(checklist)}</div>"
+    )
+
+    stage_profile = artifacts.get("stage_profile.json")
+    slide_map_chart = _chart_slide_map(reviews, inventory, stage_profile)
+    slide_map_section = f'<div class="chart-section"><h2>Slide Map</h2>{slide_map_chart}</div>'
+
+    numbers_section = _numbers_section(artifacts.get("reconciliation.json"))
+
+    main_content = (
+        f"<main>{gauge_section}{findings_section}{numbers_section}"
+        f"{radar_section}{breakdown_section}{slide_map_section}</main>"
+    )
+
+    footer = (
+        "<footer>Generated by "
+        '<a href="https://github.com/lool-ventures/founder-skills">founder skills</a>'
+        ' by <a href="https://lool.vc">lool ventures</a>'
+        " — Deck Review Agent</footer>"
+    )
+
+    html_doc = (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '    <meta charset="UTF-8">\n'
+        '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f"    <title>Deck Review: {_esc(company_name)}</title>\n"
+        f"    <style>{brand_css}{_css()}</style>\n"
+        "</head>\n"
+        "<body>\n"
+        f"{header}\n"
+        f"{main_content}\n"
+        f"{footer}\n"
+        f"    {_tooltip_js()}\n"
+        f"    {_collapsible_js()}\n"
+        f"{_theme.FOOTER_CREDIT_HTML}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+    return html_doc
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    p = argparse.ArgumentParser(description="Generate HTML visualization from deck review artifacts")
+    p.add_argument("-d", "--dir", required=True, help="Directory containing JSON artifacts")
+    p.add_argument("--pretty", action="store_true", help="Accepted for compatibility (no-op)")
+    p.add_argument("-o", "--output", help="Write HTML to file instead of stdout")
+    # THE SAME TWO FLAGS AS compose_report.py, deliberately. `report.html` is the surface a
+    # founder is most likely to open -- this file's own comments say so twice -- and the
+    # authorization boundary sat only on compose. Measured: an artifact dir with NO
+    # gate_state.json produced a complete 66 KB report.html, exit 0, no warning. So whatever
+    # the gate refused, this renderer produced anyway.
+    #
+    # Mirrored rather than reimplemented: one boundary written twice drifts, and the drift
+    # would be invisible because nobody reads the HTML.
+    p.add_argument(
+        "--ungated",
+        action="store_true",
+        help="Render without a stage gate. Legitimate (fixtures, direct calls) but not the "
+        "production path, and leaving the flag off used to spell both the same way.",
+    )
+    p.add_argument(
+        "--gate-state",
+        help="Path to gate_state.json. An absent file is fatal when named; the record of how the "
+        "gate was answered is what authorizes the report the founder opens.",
+    )
+    return p.parse_args()
+
+
+def main() -> None:
+    """Entry point."""
+    args = parse_args()
+
+    if not os.path.isdir(args.dir):
+        print(f"Error: directory not found: {args.dir}", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.gate_state and not args.ungated:
+        print(
+            "Error: no --gate-state and no --ungated. The stage gate is what authorizes the report "
+            "the founder opens; rendering without one is a deliberate choice and has to be spelled "
+            "as one.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # AUTHORIZE BEFORE RENDERING, so a refusal leaves no file behind. Reusing compose's
+    # reader and gate_state's `authorize` rather than restating either: `read_gate_state`
+    # owns the three-way absent/missing/unreadable distinction, and `authorize` is the one
+    # place a gate becomes permission.
+    if args.gate_state:
+        scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from compose_report import read_gate_state  # noqa: PLC0415
+        from gate_state import authorize  # noqa: PLC0415
+
+        try:
+            gate_state = read_gate_state(args.gate_state)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if gate_state is not None:
+            profile = _load_artifact(args.dir, "stage_profile.json") or {}
+            run_id = ""
+            for name in REQUIRED_ARTIFACTS:
+                art = _load_artifact(args.dir, name)
+                rid = _as_dict(_as_dict(art).get("metadata")).get("run_id") if _usable(art) else None
+                if isinstance(rid, str) and rid:
+                    run_id = rid
+                    break
+            verdict = authorize(gate_state, profile, run_id)
+            if not verdict.permitted:
+                print(f"Error: the gate does not authorize this report: {verdict.reason}", file=sys.stderr)
+                sys.exit(1)
+
+    html_output = compose_html(args.dir)
+    _write_output(html_output, args.output)
+
+
+if __name__ == "__main__":
+    main()

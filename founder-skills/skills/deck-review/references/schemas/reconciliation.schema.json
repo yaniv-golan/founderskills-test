@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "reconciliation.json",
+  "description": "What the deck's own numbers say about each other. Produced by reconcile.py from the ledger, the second read, and the model's proposed relations. `relations` holds ONLY what a founder sees — select() decides that, and suppressed relations are reported as counts so nothing downstream can reach past it.",
+  "type": "object",
+  "required": [
+    "status",
+    "figures_total",
+    "figures_verified",
+    "relations",
+    "validation",
+    "metadata"
+  ],
+  "properties": {
+    "status": {
+      "description": "checked = relations were computed. no_figures = the deck states too few numbers to relate; refused when the deck's own text is full of numerals. gate_failed = the second read could not corroborate enough of the ledger's quotes to trust it. Absence of this artifact means the step did not run, which is a pipeline error and is deliberately distinguishable from all three.",
+      "type": "string",
+      "enum": [
+        "checked",
+        "no_figures",
+        "gate_failed"
+      ]
+    },
+    "figures_total": {
+      "type": "integer"
+    },
+    "figures_verified": {
+      "description": "Figures whose verbatim quote was found in the second read.",
+      "type": "integer"
+    },
+    "second_read_coverage": {
+      "description": "Which figure-bearing slides the second read actually covered, as DECLARED by the reader — this compares slide-number lists and never inspects the transcript. A figure whose slide is in slides_missing is one nobody looked at: our coverage gap, not the deck's problem. It does NOT follow that such a figure failed the gate — verification matches each quote against the whole transcript without consulting the figure's slide, so a quote from an uncovered slide can still be found in another slide's text.",
+      "type": "object",
+      "properties": {
+        "slides_named": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "slides_transcribed": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "slides_missing": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "dates_excluded": {
+      "description": "Date figures dropped before the numeric gate. Every operator refuses a date participant, so a date can neither support nor contradict anything — but counting them inflated figures_total/figures_verified and could carry a thin ledger past the minimum-figures gate. Reported so the exclusion is visible rather than silent.",
+      "type": "integer"
+    },
+    "quote_quality": {
+      "description": "How many of the ledger's quotes carry no word of three or more letters. Such a quote identifies nothing: the gate matches TEXT, so a quote of '$80B' is re-found on any slide that prints $80B and confirms only that the deck contains that figure somewhere. ledger.py warns on each at extraction time; this count is the surface a reader downstream can actually see, because ledger.json is not loaded by compose.",
+      "type": "object",
+      "properties": {
+        "thin": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      }
+    },
+    "attribution": {
+      "description": "Not a gate — a field. quote_carries_label means the label's words appear in the quote; layout_attributed means they do not, and the figure's meaning rests on where it sat on the slide. The weaker of the two bounds a relation's confidence.",
+      "type": "object",
+      "properties": {
+        "quote_carries_label": {
+          "type": "integer"
+        },
+        "layout_attributed": {
+          "type": "integer"
+        }
+      }
+    },
+    "relations_proposed": {
+      "type": "integer"
+    },
+    "suppressed": {
+      "description": "Counts by reason for every computed relation the founder does NOT see. Contents are deliberately absent.",
+      "type": "object"
+    },
+    "interpretation": {
+      "description": "The demote-only pass over surviving contradictions. `not_needed` = nothing to interpret. `not_run` = contradictions survived and no pass was supplied, so the founder sees the un-reviewed set. `applied` = the pass ran, and every withdrawal is recorded with its class and reason, because a suppression with no stated ground cannot be audited later.",
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_needed",
+            "not_run",
+            "applied"
+          ]
+        },
+        "contradictions_before": {
+          "type": "integer"
+        },
+        "downgraded": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "operator",
+              "operands",
+              "class",
+              "reason"
+            ],
+            "properties": {
+              "operator": {
+                "type": "string"
+              },
+              "operands": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expected_id": {
+                "type": "string"
+              },
+              "class": {
+                "type": "string",
+                "enum": [
+                  "partial_enumeration",
+                  "approximate_stated_figure"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "rendered": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "operator",
+          "operands",
+          "rendered",
+          "confidence",
+          "verdict"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "contradiction",
+              "derived_ratio"
+            ]
+          },
+          "operator": {
+            "type": "string"
+          },
+          "operands": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "computed": {
+            "type": "number"
+          },
+          "rendered": {
+            "description": "The founder-facing line, with both sides printed in the same number space.",
+            "type": "string"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "verdict": {
+            "description": "contradiction and derived are the only two that reach a founder. convention_differs, confirmation and restatement are suppressed by select() and appear only in the counts above.",
+            "type": "string",
+            "enum": [
+              "contradiction",
+              "derived",
+              "confirmation",
+              "restatement",
+              "convention_differs",
+              "downgraded"
+            ]
+          },
+          "expected_id": {
+            "type": "string"
+          },
+          "expected_value": {
+            "type": "number"
+          },
+          "span_lo": {
+            "type": "number"
+          },
+          "span_hi": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "valid",
+            "invalid"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "untested_claims": {
+      "description": "Claims the deck makes that this run could NOT test, in the deck's own wording. Distinct from `suppressed`, which counts relations the founder does not see because nothing is wrong: these are relations that establish nothing because the comparison was refused. Without this the founder is told their figures line up about a claim that was never checked.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cap-table cap_state.json",
+  "type": "object",
+  "required": ["as_of_date", "currency", "founders", "preferred_series", "option_pool", "as_converted_totals", "metadata"],
+  "properties": {
+    "as_of_date": {"type": "string"},
+    "currency": {"type": "string"},
+    "founders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "founder_id", "common_shares"],
+        "properties": {
+          "name": {"type": "string"},
+          "founder_id": {"type": "string"},
+          "common_shares": {"type": "integer"},
+          "common_class": {"type": "string", "default": "class_a", "description": "Dual-class share class. Default class_a. Required for voting_pct math when any holder has voting_rights_multiple != 1.0."},
+          "voting_rights_multiple": {"type": "number", "default": 1.0, "description": "Voting weight per share. Default 1.0; class_b super-voting typically 10.0."},
+          "vesting": {"type": ["object", "null"]}
+        }
+      }
+    },
+    "common_batches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["holder_id", "shares", "issuance_date"],
+        "properties": {
+          "batch_id": {"type": ["string", "null"], "description": "Optional display label; holder_id is the canonical key. Absent when the agent supplied only holder_id (the skeleton-canonical shape)."},
+          "holder_name": {"type": ["string", "null"], "description": "Optional human-readable shareholder name; preferred over holder_id/batch_id in the ownership tables when present."},
+          "holder_id": {"type": "string"},
+          "shares": {"type": "integer"},
+          "issuance_date": {"type": "string"},
+          "consideration": {"type": ["number", "null"]},
+          "purpose": {"enum": ["founder_issuance", "restricted_stock_purchase", "exercise", "conversion", "other"]},
+          "common_class": {"type": "string", "default": "class_a"},
+          "voting_rights_multiple": {"type": "number", "default": 1.0}
+        }
+      }
+    },
+    "preferred_series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["series_id", "series_name", "shares", "original_issue_price", "original_conversion_price", "current_conversion_price", "issuance_date"],
+        "properties": {
+          "series_id": {"type": "string"},
+          "series_name": {"type": "string"},
+          "shares": {"type": "integer"},
+          "original_issue_price": {"type": "number"},
+          "original_conversion_price": {"type": "number"},
+          "current_conversion_price": {"type": "number"},
+          "issuance_date": {"type": "string"},
+          "liquidation_preference_multiple": {"type": "number"},
+          "liquidation_preference_type": {"enum": ["non_participating", "participating", "participating_capped"]},
+          "participation_cap_multiple": {"type": ["number", "null"]},
+          "anti_dilution_protection": {"enum": ["none", "broad_based_weighted_average", "narrow_based_weighted_average", "full_ratchet"]},
+          "ad_trigger_basis": {"enum": ["original_issue_price", "current_conversion_price"], "description": "Soft-default per §10.2.5: 'original_issue_price' (NVCA default)."},
+          "ad_a_denominator_basis": {"enum": ["nvca_broad", "nvca_narrow"], "description": "Soft-default per §10.2.5: derived from anti_dilution_protection."},
+          "ad_cp2_floor": {"type": ["number", "null"]},
+          "ad_carve_outs": {"enum": ["nvca_default"]},
+          "pro_rata_rights": {"type": "boolean"},
+          "pricing_unknown": {
+            "type": "boolean",
+            "description": "True when this series' actual issue/conversion pricing was not confirmed. Carried through from inputs by cap_state.py's canonicalizer (conditional spread, mirroring extraction_provenance) so the rule_audit matcher and the founder-facing disclosure banner (W_PRICING_UNKNOWN) can see it. When true, original_issue_price/original_conversion_price/current_conversion_price are a numeric 1.0 sentinel and anti_dilution_protection is enforced to 'none' at canonicalization."
+          },
+          "extraction_provenance": {
+            "type": ["object", "null"],
+            "properties": {
+              "source_doc": {"type": "string"},
+              "extraction_confidence": {"enum": ["high", "medium", "low"]},
+              "extracted_at": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "cap_table_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["event_type", "series_id"],
+        "properties": {
+          "event_type": {"enum": ["anti_dilution_applied", "warrant_exercised"]},
+          "round_id": {"type": "string"},
+          "applied_at": {"type": "string"},
+          "series_id": {"type": "string"},
+          "previous_ccp": {"type": "number"},
+          "new_ccp": {"type": "number"},
+          "rule_id": {"type": "string"},
+          "rule_pack_version": {"type": "string"},
+          "warrant_id": {"type": ["string", "null"], "description": "For event_type=warrant_exercised events."},
+          "shares_added": {"type": ["integer", "null"], "description": "For event_type=warrant_exercised events."},
+          "exercised_at_pps": {"type": ["number", "null"], "description": "For event_type=warrant_exercised events: FMV used in net-share-settlement (or strike for cash-exercise)."}
+        }
+      }
+    },
+    "option_pool": {
+      "type": "object",
+      "required": ["plan_type", "authorized", "issued_and_outstanding", "available_for_grant"],
+      "properties": {
+        "plan_type": {"enum": ["iso", "nso", "section_102_cg", "section_102_oi", "section_3i", "mixed"]},
+        "authorized": {"type": "integer"},
+        "issued_and_outstanding": {"type": "integer"},
+        "exercised_and_outstanding": {"type": "integer"},
+        "available_for_grant": {"type": "integer"},
+        "expired_or_forfeited": {"type": "integer"}
+      }
+    },
+    "outstanding_options": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["grant_id", "shares_vested_to_date", "shares_exercised", "shares_outstanding_unvested", "plan_type"],
+        "properties": {
+          "grant_id": {"type": "string"},
+          "holder_id": {"type": "string"},
+          "shares_vested_to_date": {"type": "integer"},
+          "shares_exercised": {"type": "integer"},
+          "shares_outstanding_unvested": {"type": "integer"},
+          "plan_type": {"enum": ["iso", "nso", "section_102_cg", "section_102_oi", "section_3i", "mixed"], "description": "Mirrored from instruments.option_grants[].plan_type. Required for rule_audit §102 matchers + compose_report flip_specifics + counsel_packet."},
+          "section_102_trustee_deposit_date": {"type": ["string", "null"]},
+          "strike_price": {"type": ["number", "null"]},
+          "grant_date": {"type": ["string", "null"]},
+          "vesting": {"type": ["object", "null"]},
+          "source_doc": {"type": ["string", "null"]},
+          "extraction_confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", "n_a", "user_asserted", null]}
+        }
+      }
+    },
+    "outstanding_safes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["safe_id", "purchase_amount", "issuance_date"],
+        "properties": {
+          "safe_id": {"type": "string"},
+          "investor_name": {"type": ["string", "null"]},
+          "purchase_amount": {"type": ["number", "null"]},
+          "issuance_date": {"type": ["string", "null"]},
+          "mfn_status": {"enum": ["absent", "present_unelected", "elected", "cherry_pick_pending"], "default": "absent", "description": "Derived from instruments.safes[i].mfn_provision at canonicalization. Soft-default 'absent' when no mfn_provision object."},
+          "source_doc": {"type": ["string", "null"]},
+          "extraction_confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", "n_a", "user_asserted", null]}
+        }
+      }
+    },
+    "outstanding_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["note_id", "principal", "issuance_date"],
+        "properties": {
+          "note_id": {"type": "string"},
+          "investor_name": {"type": ["string", "null"]},
+          "principal": {"type": ["number", "null"]},
+          "issuance_date": {"type": ["string", "null"]},
+          "subtype": {"type": ["string", "null"], "enum": ["convertible_note", "convertible_loan_agreement", "convertible_security", null]},
+          "governing_law": {"type": ["string", "null"], "enum": ["delaware", "israeli", "uk", "cayman", "other", null]},
+          "source_doc": {"type": ["string", "null"]},
+          "extraction_confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", "n_a", "user_asserted", null]}
+        }
+      }
+    },
+    "outstanding_warrants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["warrant_id", "shares_underlying", "exercise_price", "warrant_type", "issuance_date", "settlement_type", "vested_flag"],
+        "properties": {
+          "warrant_id": {"type": "string"},
+          "investor_name": {"type": ["string", "null"]},
+          "shares_underlying": {"type": "integer", "minimum": 1},
+          "exercise_price": {"type": ["number", "null"], "minimum": 0.0},
+          "warrant_type": {"enum": ["common_stock", "preferred_stock_series", "preferred_stock_blank_check"]},
+          "preferred_series_id": {"type": ["string", "null"]},
+          "vested_flag": {"type": "boolean"},
+          "vesting": {"type": ["object", "null"]},
+          "issuance_date": {"type": "string"},
+          "expiration_date": {"type": ["string", "null"]},
+          "origin": {"type": ["string", "null"], "enum": ["debt_facility_kicker", "equipment_lease", "advisor_grant", "investor_kicker", "other", null]},
+          "settlement_type": {"enum": ["cash_exercise", "net_share_settlement", "holder_election"]},
+          "holder_election_choice": {"type": ["string", "null"], "enum": ["cash", "net_share", null]},
+          "anti_dilution_clause": {"type": ["object", "null"]},
+          "exercise_event_date": {"type": ["string", "null"]},
+          "exercised_flag": {"type": "boolean", "default": false},
+          "source_doc": {"type": ["string", "null"]},
+          "extraction_confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", "n_a", "user_asserted", null]}
+        }
+      }
+    },
+    "aoa_findings": {
+      "type": "object",
+      "description": "Read-only mirror of inputs.aoa_findings populated by cap_state.py at canonicalization. NEVER mutated downstream.",
+      "properties": {
+        "pay_to_play_detected": {"type": "boolean", "default": false},
+        "drag_along_threshold_pct": {"type": ["number", "null"]},
+        "section_102_plan_reference": {"type": ["boolean", "null"]},
+        "ratchet_anti_dilution_detected": {"type": "boolean", "default": false},
+        "liquidation_preference_above_1x": {"type": ["boolean", "null"]},
+        "participation_present": {"type": ["boolean", "null"]},
+        "dividend_provisions_present": {"type": ["boolean", "null"]},
+        "protective_provisions_below_75_pct": {"type": ["boolean", "null"]},
+        "bring_along_threshold_pct": {"type": ["number", "null"]}
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Structured warning codes emitted at canonicalization (v0.5.0 Bug 4: W_AOA_ONLY_NO_INSTRUMENTS when all instruments arrays are empty and AoA findings are present).",
+      "items": {"type": "string"}
+    },
+    "as_converted_totals": {
+      "type": "object",
+      "required": ["common_shares", "preferred_shares_as_converted", "options_outstanding", "options_available", "warrants_underlying_total", "fully_diluted_shares"],
+      "properties": {
+        "common_shares": {"type": "integer"},
+        "preferred_shares_as_converted": {"type": "integer"},
+        "options_outstanding": {"type": "integer"},
+        "options_available": {"type": "integer"},
+        "warrants_underlying_total": {"type": "integer", "minimum": 0, "description": "Sum of cap_state.outstanding_warrants[*].shares_underlying where vested_flag is true. Included in fully_diluted_shares."},
+        "fully_diluted_shares": {"type": "integer", "description": "common + preferred-as-converted + options outstanding + options available + warrants_underlying_total"}
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["run_id", "schema_version"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "produced_by": {"type": "string"},
+        "source_inputs": {"type": "array", "items": {"type": "string"}},
+        "schema_version": {"const": "v0.5.0-cap-state"},
+        "company_name": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
