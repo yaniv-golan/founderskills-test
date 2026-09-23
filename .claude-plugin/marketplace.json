@@ -1,0 +1,11 @@
+{
+  "name": "founderskills-test",
+  "owner": {"name": "yaniv-golan"},
+  "plugins": [
+    {
+      "name": "founder-skills",
+      "source": "./founder-skills",
+      "description": "Founder skills plugin (test mirror)"
+    }
+  ]
+}

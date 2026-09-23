@@ -1,0 +1,825 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Review completeness gate for financial model review.
+
+Validates artifact existence, content quality, and cross-artifact consistency.
+Exit 0 = publishable, exit 1 = gaps remain.
+
+Usage:
+    python verify_review.py --dir <artifacts_dir> [--gate {1,2}] [--pretty] [-o <file>]
+
+Output:
+    stdout: JSON with status, artifacts, cross_checks, summary
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import sys
+from typing import Any
+
+# Sibling helper: recompute the fingerprint of the inputs each output was graded against.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _fingerprint  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_artifact(dir_path: str, name: str) -> tuple[dict[str, Any] | None, bool, bool]:
+    """Load a JSON artifact from dir.
+
+    Returns (data, is_valid, is_corrupt).
+    - File exists and parses: (data, True, False)
+    - File missing: (None, False, False)
+    - File exists but invalid JSON: (None, False, True)
+    """
+    path = os.path.join(dir_path, name)
+    if not os.path.exists(path):
+        return None, False, False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data, True, False
+    except (json.JSONDecodeError, ValueError):
+        return None, False, True
+
+
+def _is_skipped(data: dict[str, Any] | None) -> bool:
+    """Check if an artifact is a skipped stub."""
+    return isinstance(data, dict) and data.get("skipped") is True
+
+
+def _deep_get(data: dict[str, Any] | None, *keys: str) -> Any:
+    """Safely traverse nested dicts."""
+    current: Any = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _approx_eq(a: float | int | None, b: float | int | None, threshold: float = 0.2) -> bool:
+    """Check if two values are within threshold relative difference."""
+    if a is None or b is None:
+        return True  # can't compare, not a divergence
+    if a == 0 and b == 0:
+        return True
+    denom = max(abs(a), abs(b))
+    if denom == 0:
+        return True
+    return abs(a - b) / denom <= threshold
+
+
+def _issue(level: str, message: str) -> dict[str, str]:
+    """Create an issue dict."""
+    return {"severity": level, "message": message}
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — Existence checks
+# ---------------------------------------------------------------------------
+
+_ALWAYS_REQUIRED = [
+    "inputs.json",
+    "checklist.json",
+    "unit_economics.json",
+    "runway.json",
+    "report.json",
+]
+
+_OPTIONAL = ["model_data.json", "report.html", "explore.html"]
+
+
+def _check_existence(dir_path: str, gate: int) -> dict[str, dict[str, Any]]:
+    """Check artifact existence. Returns per-artifact status dicts."""
+    results: dict[str, dict[str, Any]] = {}
+
+    # Determine which artifacts to check
+    required = list(_ALWAYS_REQUIRED)
+
+    # commentary.json is required at Gate 2 for all quantitative reviews.
+    # Detect quantitative path: unit_economics.json and runway.json exist and are not skipped.
+    _require_commentary = False
+    if gate >= 2:
+        for quant_name in ("unit_economics.json", "runway.json"):
+            quant_path = os.path.join(dir_path, quant_name)
+            if os.path.isfile(quant_path):
+                try:
+                    with open(quant_path, encoding="utf-8") as _f:
+                        _qdata = json.load(_f)
+                    if isinstance(_qdata, dict) and not _qdata.get("skipped"):
+                        _require_commentary = True
+                except (json.JSONDecodeError, OSError):
+                    pass
+    if _require_commentary:
+        required.append("commentary.json")
+
+    all_names = required + _OPTIONAL
+    # Also include commentary.json if not already required (so it appears in output)
+    if "commentary.json" not in all_names:
+        all_names.append("commentary.json")
+
+    for name in all_names:
+        is_required = name in required
+
+        # HTML files: check existence only, no JSON parsing
+        if name.endswith(".html"):
+            path = os.path.join(dir_path, name)
+            exists = os.path.isfile(path)
+            entry: dict[str, Any] = {
+                "exists": exists,
+                "valid": exists,
+                "issues": [],
+                "_data": None,
+                "_skipped": False,
+            }
+            if not exists and is_required:
+                entry["issues"].append(_issue("error", f"{name}: missing (required)"))
+            results[name] = entry
+            continue
+
+        data, is_valid, is_corrupt = _load_artifact(dir_path, name)
+        exists = is_valid or is_corrupt  # file exists even if corrupt
+
+        entry = {
+            "exists": exists,
+            "valid": is_valid,
+            "issues": [],
+        }
+
+        if is_corrupt:
+            entry["issues"].append(_issue("error", f"{name}: corrupt JSON"))
+        elif not exists and is_required:
+            entry["issues"].append(_issue("error", f"{name}: missing (required)"))
+
+        # Store data for downstream checks
+        entry["_data"] = data
+        entry["_skipped"] = _is_skipped(data)
+
+        results[name] = entry
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 — Quality checks
+# ---------------------------------------------------------------------------
+
+
+def _check_inputs_quality(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate inputs.json content quality."""
+    issues: list[dict[str, str]] = []
+
+    # Errors for null critical fields
+    error_fields = [
+        (("company", "company_name"), "company.company_name"),
+        (("company", "stage"), "company.stage"),
+    ]
+    for keys, label in error_fields:
+        if _deep_get(data, *keys) is None:
+            issues.append(_issue("error", f"{label} is null"))
+
+    # At least one revenue metric required — unless the absence is honest:
+    # an agent-estimated review (data_confidence estimated/mixed), or a real
+    # revenue time series with no labeled scalar. Fabricated-empty (no series,
+    # no estimated/mixed confidence) still hard-fails.
+    mrr_value = _deep_get(data, "revenue", "mrr", "value")
+    monthly_total = _deep_get(data, "revenue", "monthly_total")
+    if mrr_value is None and monthly_total is None:
+
+        def _has_series(key: str) -> bool:
+            series = _deep_get(data, "revenue", key)
+            return isinstance(series, list) and any(
+                isinstance(e, dict)
+                and isinstance(e.get("total"), (int, float))
+                and not isinstance(e.get("total"), bool)
+                for e in series
+            )
+
+        honest = (
+            _deep_get(data, "company", "data_confidence") in ("estimated", "mixed")
+            or _has_series("monthly")
+            or _has_series("quarterly")
+        )
+        message = "revenue.mrr.value or revenue.monthly_total is required"
+        if honest:
+            message += " — accepted: revenue evidence present as a series or estimated-confidence review"
+        issues.append(_issue("warning" if honest else "error", message))
+
+    # Warnings for null fields
+    warning_fields = [
+        (("cash", "current_balance"), "cash.current_balance"),
+        (("cash", "monthly_net_burn"), "cash.monthly_net_burn"),
+    ]
+    for keys, label in warning_fields:
+        if _deep_get(data, *keys) is None:
+            issues.append(_issue("warning", f"{label} is null"))
+
+    return issues
+
+
+def _internal_files_in(text: str) -> list[str]:
+    """Internal artifact/script filenames present in founder-facing text.
+
+    Delegates to the shared founder-text policy so "internal" means one thing across the fleet, and so
+    a founder's OWN uploaded filename is not flagged — naming their upload back to them is useful
+    ("the file is called sample_model.xlsx, which looks like a template").
+
+    Returns [] when the shared module is unavailable: a missing policy must never fail a review.
+    """
+    try:
+        shared = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "scripts"))
+        if shared not in sys.path:
+            sys.path.insert(0, shared)
+        import _founder_text  # type: ignore[import-not-found]
+    except ImportError:
+        return []
+    found: list[str] = _founder_text.scan(text)["filenames"]
+    return found
+
+
+def _check_checklist_quality(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate checklist.json content quality."""
+    issues: list[dict[str, str]] = []
+    items = data.get("items", [])
+
+    # Exactly 46 items
+    if len(items) != 46:
+        issues.append(_issue("error", f"Expected 46 checklist items, got {len(items)}"))
+
+    # Every item with pass/fail/warn status must have non-empty evidence
+    for item in items:
+        status = item.get("status")
+        if status is None:
+            issues.append(_issue("error", f"Item {item.get('id', '?')}: null status"))
+            continue
+        if status in ("pass", "fail", "warn"):
+            evidence = item.get("evidence")
+            if not evidence:
+                issues.append(
+                    _issue(
+                        "error",
+                        f"Item {item.get('id', '?')}: empty evidence for status '{status}'",
+                    )
+                )
+            elif isinstance(evidence, str):
+                # Evidence is printed verbatim in the founder's report, so an internal filename in it
+                # reaches the founder. The agent body asks for the source named the way the founder
+                # knows it; this is what makes that checkable rather than merely requested — prose
+                # guidance on its own has measured as inert in this fleet.
+                leaked = _internal_files_in(evidence)
+                if leaked:
+                    issues.append(
+                        _issue(
+                            "warning",
+                            f"Item {item.get('id', '?')}: evidence names internal file(s) "
+                            f"{', '.join(leaked)} — the founder never saw them; cite what is true of "
+                            f"the model instead",
+                        )
+                    )
+
+    return issues
+
+
+def _check_ue_quality(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate unit_economics.json content quality."""
+    issues: list[dict[str, str]] = []
+
+    # If partial_analysis or insufficient_data, accept with warning (mirror of
+    # _check_runway_quality) — a genuinely sparse model has <2 computable metrics
+    # by construction, not a fabrication.
+    if data.get("partial_analysis") or data.get("insufficient_data"):
+        issues.append(_issue("warning", "Unit economics are partial or have insufficient data"))
+        return issues
+
+    # Use summary.computed from unit_economics.py which counts all metrics
+    # with non-null values (regardless of rating).  This avoids undercounting
+    # valid-but-unbenchmarked metrics that carry not_rated or contextual ratings.
+    summary = data.get("summary")
+    if isinstance(summary, dict) and "computed" in summary:
+        computed = summary["computed"]
+    else:
+        # Fallback: count value-bearing metrics directly
+        metrics = data.get("metrics", [])
+        computed = sum(1 for m in metrics if m.get("value") is not None)
+
+    if computed < 2:
+        issues.append(_issue("error", f"Only {computed} computed metrics (need >= 2)"))
+
+    return issues
+
+
+def _check_runway_quality(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate runway.json content quality."""
+    issues: list[dict[str, str]] = []
+
+    # If partial_analysis or insufficient_data, accept with warning
+    if data.get("partial_analysis") or data.get("insufficient_data"):
+        issues.append(_issue("warning", "Runway analysis is partial or has insufficient data"))
+        return issues
+
+    # At least 1 scenario with non-null runway_months
+    scenarios = data.get("scenarios", [])
+    has_runway = any(s.get("runway_months") is not None for s in scenarios)
+    # default-alive companies legitimately have runway_months: null in every
+    # scenario (cash never runs out) — that is a valid, publishable result
+    default_alive = any(s.get("default_alive") for s in scenarios)
+    if not has_runway and not default_alive:
+        issues.append(_issue("error", "No scenario has non-null runway_months"))
+
+    # baseline.net_cash null is a warning
+    net_cash = _deep_get(data, "baseline", "net_cash")
+    if net_cash is None:
+        issues.append(_issue("warning", "baseline.net_cash is null"))
+
+    return issues
+
+
+def _check_report_quality(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate report.json content quality."""
+    issues: list[dict[str, str]] = []
+
+    report_md = data.get("report_markdown")
+    if not report_md:
+        issues.append(_issue("error", "report_markdown is empty"))
+
+    if _deep_get(data, "validation", "status") is None:
+        issues.append(_issue("error", "validation.status is missing"))
+
+    return issues
+
+
+def _check_commentary_quality(data: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate commentary.json content quality."""
+    issues: list[dict[str, str]] = []
+
+    headline = data.get("headline")
+    if not headline:
+        issues.append(_issue("error", "headline is empty or missing"))
+
+    lenses = data.get("lenses", {})
+    if not isinstance(lenses, dict) or len(lenses) < 1:
+        issues.append(_issue("error", "lenses must have >= 1 key"))
+
+    return issues
+
+
+_QUALITY_CHECKS: dict[str, Any] = {
+    "inputs.json": _check_inputs_quality,
+    "checklist.json": _check_checklist_quality,
+    "unit_economics.json": _check_ue_quality,
+    "runway.json": _check_runway_quality,
+    "report.json": _check_report_quality,
+    "commentary.json": _check_commentary_quality,
+}
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — Cross-artifact consistency
+# ---------------------------------------------------------------------------
+
+
+# Per-artifact remedies. NOT one generic "re-run the producer": that instruction is WRONG for
+# checklist.json. Its pipeline is sub-agent judgement -> `cat handoff/checklist_output.json |
+# checklist.py --inputs inputs.json`, so re-piping the OLD hand-off against NEW inputs stamps a current
+# fingerprint over judgements made from stale inputs — manufacturing exactly the false "graded against
+# current inputs" claim this gate exists to prevent.
+_REMEDY = {
+    "unit_economics.json": (
+        "re-run it: `cat <dir>/inputs.json | python3 <scripts>/unit_economics.py -o <dir>/unit_economics.json`."
+    ),
+    "runway.json": "re-run it: `cat <dir>/inputs.json | python3 <scripts>/runway.py -o <dir>/runway.json`.",
+    "checklist.json": (
+        "re-dispatch the CHECKLIST sub-agent — do NOT re-pipe the existing hand-off file, which would "
+        "stamp a current fingerprint over judgements made from the old inputs."
+    ),
+}
+
+# This gate runs AFTER compose, so a stale producer artifact was already composed into the report.
+# Re-running the producer alone clears the gate and leaves the delivered report carrying stale figures,
+# which turns a detected staleness into an undetected one.
+_CASCADE = "Then re-run compose_report.py, and any visualize/explore/coaching steps already run."
+
+# The branch that the incident needed and no instruction covered. A live run ran the re-run remedy,
+# watched the mismatch persist (the stamp itself was buggy), concluded re-running was futile, and
+# patched the artifact to match. Re-running is only the remedy when the INPUTS moved.
+_DEFECTIVE_GATE = (
+    "If the mismatch survives a clean re-run, the stamp itself is wrong, not the artifact: stop and "
+    "report the gate as defective. Never edit graded_against to make this pass."
+)
+
+
+# Artifacts whose producer is a PURE function of inputs.json, so the verifier can rebuild them and ask
+# the question that matters — "would this artifact be different if rebuilt?" — instead of the question
+# the fingerprint answers, "were the inputs byte-identical?". This is recomputation, not a second
+# implementation: the producer's own function is imported and called, so there is no math to drift.
+#
+# Used ONLY to suppress a false staleness alarm, never as a standalone fabrication check. Comparing
+# content unconditionally would require every artifact to be byte-identical to a fresh producer run,
+# which is true of production artifacts but not of the deliberately artificial fixtures that exercise
+# this verifier's other checks. Forged-stamp resistance comes from the value-level net_cash comparison
+# in _check_cross_consistency, which is evidence independent of both the stamp and the producer.
+#
+# checklist.json is absent by necessity, not oversight — its content is 46 LLM-judged statuses with
+# prose evidence, and nothing in inputs.json determines them. No recompute can reach it.
+_RECOMPUTABLE = {
+    "unit_economics.json": ("unit_economics", "_compute_metrics"),
+    "runway.json": ("runway", "_compute_runway"),
+}
+
+
+def _recompute(name: str, inputs_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebuild an artifact's content from current inputs. None when it cannot be done safely.
+
+    `runway._compute_runway` falls back to `datetime.now()` for a missing `cash.balance_date`
+    (runway.py:731), which would make the comparison drift across a month boundary. Recompute is
+    skipped in that case rather than producing a check that fails on the calendar.
+    """
+    spec = _RECOMPUTABLE.get(name)
+    if spec is None:
+        return None
+    if name == "runway.json" and not _deep_get(inputs_data, "cash", "balance_date"):
+        return None
+    module_name, func_name = spec
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        module = __import__(module_name)
+        func = getattr(module, func_name)
+        return dict(func(json.loads(json.dumps(inputs_data))))  # deep copy: the producer mutates
+    except Exception:
+        # A producer that cannot run on these inputs tells us nothing about staleness; fall back to
+        # the fingerprint comparison rather than inventing a verdict.
+        return None
+
+
+def _content_differs(stored: dict[str, Any], fresh: dict[str, Any]) -> bool:
+    """Compare an artifact's CONTENT, ignoring the bookkeeping the producer adds around it."""
+    core = {k: v for k, v in stored.items() if k not in ("metadata", _fingerprint.GRADED_AGAINST)}
+    return json.dumps(core, sort_keys=True) != json.dumps(fresh, sort_keys=True)
+
+
+def _check_inputs_drift(
+    artifacts: dict[str, dict[str, Any]],
+    inputs_data: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Flag an output computed against a version of inputs.json that no longer exists.
+
+    Compared against the CURRENT inputs, recomputed here — not against the other outputs. Outputs can
+    all agree with each other while all of them are stale, which is exactly what happens when
+    corrections land after they ran. run_id parity cannot see it: corrections rewrite inputs.json
+    inside one run, so every artifact still carries the same run_id.
+
+    A recorded None means the producer could not see its inputs, which is reported as unverifiable
+    rather than passed over: "no fingerprint" and "matching fingerprint" are different claims.
+    """
+    checks: list[dict[str, str]] = []
+    current = _fingerprint.fingerprint(inputs_data)
+
+    for name in ("checklist.json", "unit_economics.json", "runway.json"):
+        entry = artifacts.get(name, {})
+        data = entry.get("_data")
+        if data is None or entry.get("_skipped"):
+            continue
+        graded = data.get(_fingerprint.GRADED_AGAINST)
+        if not isinstance(graded, dict) or "inputs.json" not in graded:
+            # NOT a silent skip. All three producers stamp this key unconditionally, so its absence in
+            # an artifact from this run means it was removed after the fact — which is the CHEAPEST way
+            # to clear this gate: `del d["graded_against"]` beats forging a 64-char hash. Measured
+            # before this branch existed: a wrong hash failed the gate, a deleted stamp passed it clean.
+            checks.append(
+                _issue(
+                    "error",
+                    f"{name} carries no record of the inputs it was computed from. Every producer writes "
+                    f"one, so it was removed after the fact — {_REMEDY[name]}",
+                )
+            )
+            continue
+        recorded = graded.get("inputs.json")
+        if recorded is None:
+            checks.append(
+                _issue(
+                    "warning",
+                    f"{name} records no fingerprint of the inputs it was computed from, so it cannot be shown current",
+                )
+            )
+        elif recorded != current:
+            # The fingerprint answers "were the inputs byte-identical?". What matters is "would this
+            # artifact be different if rebuilt?" — and for a pure producer we can just ask. Measured:
+            # correcting `cash.current_balance` by 8% moves NO unit-economics metric, so the hash alone
+            # raises a false alarm on an artifact that is current in every way a founder can see. A
+            # false alarm with no remedy is what produced the artifact-patching incident.
+            fresh = _recompute(name, inputs_data)
+            if fresh is not None and not _content_differs(data, fresh):
+                continue
+            checks.append(
+                _issue(
+                    "error",
+                    f"{name} was computed from a different version of the inputs than the one on disk "
+                    f"now, so its figures describe a model that no longer exists. {_REMEDY[name]} "
+                    f"{_CASCADE} {_DEFECTIVE_GATE}",
+                )
+            )
+    return checks
+
+
+def _check_cross_consistency(
+    artifacts: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Check consistency across artifacts."""
+    checks: list[dict[str, str]] = []
+
+    # Collect run_ids from non-skipped, valid artifacts
+    run_ids: dict[str, str] = {}
+    for name, entry in artifacts.items():
+        data = entry.get("_data")
+        if data is None or entry.get("_skipped"):
+            continue
+        rid = _deep_get(data, "metadata", "run_id")
+        if rid is not None:
+            run_ids[name] = rid
+
+    # Check run_id consistency
+    unique_ids = set(run_ids.values())
+    if len(unique_ids) > 1:
+        checks.append(
+            _issue(
+                "error",
+                f"run_id mismatch across artifacts: {dict(run_ids)}",
+            )
+        )
+
+    # Get inputs data for cross-checks
+    inputs_data = artifacts.get("inputs.json", {}).get("_data")
+    if inputs_data is None or artifacts.get("inputs.json", {}).get("_skipped"):
+        return checks
+
+    checks.extend(_check_inputs_drift(artifacts, inputs_data))
+
+    # runway.baseline.net_cash vs inputs net cash (current_balance - debt)
+    runway_entry = artifacts.get("runway.json", {})
+    runway_data = runway_entry.get("_data")
+    if runway_data and not runway_entry.get("_skipped"):
+        runway_cash = _deep_get(runway_data, "baseline", "net_cash")
+        raw_balance = _deep_get(inputs_data, "cash", "current_balance")
+        raw_debt = _deep_get(inputs_data, "cash", "debt")
+        inputs_cash = (raw_balance if isinstance(raw_balance, (int, float)) else 0) - (
+            raw_debt if isinstance(raw_debt, (int, float)) else 0
+        )
+        if not _approx_eq(runway_cash, inputs_cash):
+            checks.append(
+                _issue(
+                    "warning",
+                    f"runway baseline.net_cash ({runway_cash}) diverges >20% from inputs net cash ({inputs_cash})",
+                )
+            )
+        elif (
+            isinstance(runway_cash, (int, float))
+            and _deep_get(runway_data, "baseline", "monthly_burn") is not None
+            and abs(runway_cash - inputs_cash) > 0.5
+        ):
+            # EXACT arm, not a second tolerance. `net_cash` is a plain subtraction of two inputs
+            # fields, so any real difference means this artifact was computed from different inputs —
+            # a fact independent of `graded_against`, and therefore still true when that field has been
+            # hand-edited to make the hash check pass. The 20% arm above stays: it catches gross
+            # divergence, this catches the sub-tolerance staleness a corrected figure produces.
+            #
+            # Gated on `monthly_burn is not None` because runway.py has a degenerate branch
+            # (runway.py:675) that reports `net_cash: current_balance` WITHOUT subtracting debt. On that
+            # path the values legitimately differ, and an exact check would fire on a correct artifact.
+            #
+            # PARTIAL COVERAGE, deliberately recorded: this is one field of one artifact.
+            # unit_economics.json would need the producer's metric math re-implemented here, and
+            # checklist.json is uncoverable in principle — its content is LLM-judged statuses that no
+            # value in inputs.json determines. Do not read a clean run here as "the stamps are honest".
+            checks.append(
+                _issue(
+                    "error",
+                    f"runway baseline.net_cash ({runway_cash}) does not equal inputs net cash "
+                    f"({inputs_cash}) — this artifact was computed from different inputs, whatever its "
+                    f"recorded fingerprint says. {_REMEDY['runway.json']} {_CASCADE}",
+                )
+            )
+
+    # Latest monthly total vs MRR
+    mrr_value = _deep_get(inputs_data, "revenue", "mrr", "value")
+    monthly = _deep_get(inputs_data, "revenue", "monthly")
+    if isinstance(monthly, list) and monthly and mrr_value is not None:
+        latest = monthly[-1]
+        latest_total = latest.get("total") if isinstance(latest, dict) else None
+        if not _approx_eq(latest_total, mrr_value):
+            checks.append(
+                _issue(
+                    "warning",
+                    f"Latest monthly timeseries total ({latest_total}) diverges "
+                    f">20% from revenue.mrr.value ({mrr_value})",
+                )
+            )
+
+    # ARR/12 vs MRR
+    arr_value = _deep_get(inputs_data, "revenue", "arr", "value")
+    if arr_value is not None and mrr_value is not None:
+        arr_monthly = arr_value / 12
+        if not _approx_eq(arr_monthly, mrr_value):
+            checks.append(
+                _issue(
+                    "warning",
+                    f"ARR/12 ({arr_monthly:.0f}) diverges >20% from revenue.mrr.value ({mrr_value})",
+                )
+            )
+
+    return checks
+
+
+# ---------------------------------------------------------------------------
+# Tier 4 — Stray-file check (end-of-run only, gate 2)
+# ---------------------------------------------------------------------------
+
+# Glob allowlist of everything a legitimate run may leave in the work dir.
+# Optional entries (html, corrections round-trip, founder extras) are why
+# this is a WARN, not an error: hard-fail only after one clean release cycle.
+_STRAY_ALLOWLIST = [
+    "inputs.json",
+    "model_data.json",
+    "checklist.json",
+    "unit_economics.json",
+    "runway.json",
+    "report.json",
+    "report.md",
+    "commentary.json",
+    "report.html",
+    "explore.html",
+    "inputs_review.html",
+    "review.html",
+    "extraction_validation.json",
+    "corrected_inputs.json",
+    "extraction_corrections.json",
+    "corrections*.json",
+    "verify*.json",
+    # Context A hand-off audit trail (per-run subdirs; permanent by design)
+    "handoff/*",
+]
+
+
+def _check_stray_files(dir_path: str) -> list[dict[str, str]]:
+    """Warn on files in the work dir outside the glob allowlist.
+
+    A sub-agent writing canonical-looking files directly (instead of its
+    handoff/ OUTPUT_PATH) is the fabrication pattern this catches. WARN
+    severity: founder-requested extras are legitimate.
+    """
+    issues: list[dict[str, str]] = []
+    if not os.path.isdir(dir_path):
+        return issues
+    for root, _dirs, files in os.walk(dir_path):
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), dir_path)
+            rel_posix = rel.replace(os.sep, "/")
+            if rel_posix.startswith("handoff/"):
+                continue
+            if any(fnmatch.fnmatch(rel_posix, pat) for pat in _STRAY_ALLOWLIST):
+                continue
+            issues.append(
+                _issue(
+                    "warning",
+                    f"stray file outside the allowlist: {rel_posix} — if a sub-agent wrote it, "
+                    f"re-run the producer pipe; if founder-requested, ignore",
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Main verification
+# ---------------------------------------------------------------------------
+
+
+def verify(dir_path: str, gate: int = 2) -> dict[str, Any]:
+    """Run all verification checks and return the result dict."""
+    # Tier 1: existence
+    artifacts = _check_existence(dir_path, gate)
+
+    # Tier 2: quality checks on valid, non-skipped artifacts
+    for name, check_fn in _QUALITY_CHECKS.items():
+        entry = artifacts.get(name)
+        if entry is None:
+            continue
+        data = entry.get("_data")
+        if data is None or entry.get("_skipped"):
+            continue
+        quality_issues = check_fn(data)
+        entry["issues"].extend(quality_issues)
+
+    # Tier 3: cross-artifact consistency
+    cross_checks = _check_cross_consistency(artifacts)
+
+    # Tier 4: stray-file allowlist (end-of-run gate only — mid-pipeline the
+    # work dir legitimately lacks the later deliverables and this check
+    # would be noise)
+    if gate >= 2:
+        cross_checks.extend(_check_stray_files(dir_path))
+
+    # Build summary
+    all_errors: list[str] = []
+    all_warnings: list[str] = []
+    total_checks = 0
+    passed = 0
+    failed = 0
+
+    for _name, entry in artifacts.items():
+        for issue in entry.get("issues", []):
+            total_checks += 1
+            if issue["severity"] == "error":
+                all_errors.append(issue["message"])
+                failed += 1
+            else:
+                all_warnings.append(issue["message"])
+                passed += 1
+
+    for cc in cross_checks:
+        total_checks += 1
+        if cc["severity"] == "error":
+            all_errors.append(cc["message"])
+            failed += 1
+        else:
+            all_warnings.append(cc["message"])
+            passed += 1
+
+    # Count artifact-level passes (valid artifacts with no issues count as passed checks)
+    for _name, entry in artifacts.items():
+        if entry["valid"] and not entry.get("issues"):
+            total_checks += 1
+            passed += 1
+
+    status = "pass" if not all_errors else "fail"
+
+    # Clean internal fields from output
+    clean_artifacts: dict[str, Any] = {}
+    for name, entry in artifacts.items():
+        clean_artifacts[name] = {
+            "exists": entry["exists"],
+            "valid": entry["valid"],
+            "issues": entry["issues"],
+        }
+
+    return {
+        "status": status,
+        "artifacts": clean_artifacts,
+        "cross_checks": [{"severity": cc["severity"], "message": cc["message"]} for cc in cross_checks],
+        "summary": {
+            "total_checks": total_checks,
+            "passed": passed,
+            "failed": failed,
+            "errors": all_errors,
+            "warnings": all_warnings,
+        },
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Review completeness gate for financial model review")
+    parser.add_argument("--dir", required=True, help="Artifacts directory")
+    parser.add_argument(
+        "--gate",
+        type=int,
+        choices=[1, 2],
+        default=2,
+        help="Gate level: 1=after compose, 2=final (default)",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    parser.add_argument("-o", dest="output_file", help="Write output to file")
+    args = parser.parse_args()
+
+    result = verify(args.dir, gate=args.gate)
+
+    indent = 2 if args.pretty else None
+    output = json.dumps(result, indent=indent)
+
+    if args.output_file:
+        abs_path = os.path.abspath(args.output_file)
+        parent = os.path.dirname(abs_path)
+        if parent == "/":
+            print(f"Error: output path resolves to root directory: {args.output_file}", file=sys.stderr)
+            sys.exit(1)
+        os.makedirs(parent, exist_ok=True)
+        with open(abs_path, "w", encoding="utf-8") as f:
+            f.write(output)
+            f.write("\n")
+        receipt = {"ok": True, "path": abs_path, "bytes": len((output + "\n").encode("utf-8"))}
+        sys.stdout.write(json.dumps(receipt, separators=(",", ":")) + "\n")
+    else:
+        print(output)
+
+    sys.exit(0 if result["status"] == "pass" else 1)
+
+
+if __name__ == "__main__":
+    main()
